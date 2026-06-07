@@ -1,0 +1,17 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Raw reactor data files (keep derived/example payload files trackable)
+*_Reactor*_Data.json
+*_Data.json
+data_files/
