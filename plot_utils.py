@@ -187,7 +187,7 @@ def compute_axis_limits(
 
 
 # ---------------------------------------------------------------------------
-#  Exposure table  (pressure × time integral per phase per cycle)
+#  Exposure table  (pressure × time integral for dose+hold per cycle)
 # ---------------------------------------------------------------------------
 
 def compute_exposure_table(
@@ -199,8 +199,8 @@ def compute_exposure_table(
     assign_phase_fn,
 ) -> list:
     """
-    For every (cycle, phase) pair compute the trapezoidal exposure integral
-    (pressure × time, mTorr·s), the phase duration, and the mean pressure.
+    For every cycle, compute trapezoidal exposure over only the ``dose`` and
+    ``hold`` phases, combined into one integration per sequence/valve label.
 
     Returns a list of dicts with keys:
         cycle, phase, exposure_mTorr_s, duration_s, mean_pressure_mTorr
@@ -211,7 +211,17 @@ def compute_exposure_table(
             cycle, cycle_points, cycle_start_map,
             phased_seq, cyc_seq_map, assign_phase_fn,
         )
+        grouped: dict = {}
+
         for phase_name, (times, pressures) in segs.items():
+            if phase_name == "unassigned":
+                continue
+            parts = str(phase_name).rsplit("_", 1)
+            if len(parts) != 2:
+                continue
+            phase_head, phase_tail = parts
+            if phase_tail not in {"dose", "hold"}:
+                continue
             if len(times) < 2:
                 continue
             exposure = sum(
@@ -219,13 +229,27 @@ def compute_exposure_table(
                 for j in range(1, len(times))
             )
             duration = times[-1] - times[0]
-            mean_p   = exposure / duration if duration > 0 else 0.0
+            if duration <= 0:
+                continue
+            bucket = grouped.setdefault(
+                phase_head,
+                {"exposure": 0.0, "duration": 0.0},
+            )
+            bucket["exposure"] += exposure
+            bucket["duration"] += duration
+
+        for phase_head, vals in grouped.items():
+            total_exposure = vals["exposure"]
+            total_duration = vals["duration"]
+            if total_duration <= 0:
+                continue
+            mean_p = total_exposure / total_duration
             rows.append({
                 "cycle":               cycle,
-                "phase":               phase_name,
-                "exposure_mTorr_s":    round(exposure, 4),
-                "duration_s":          round(duration, 4),
-                "mean_pressure_mTorr": round(mean_p,   4),
+                "phase":               f"{phase_head}_dose_hold",
+                "exposure_mTorr_s":    round(total_exposure, 4),
+                "duration_s":          round(total_duration, 4),
+                "mean_pressure_mTorr": round(mean_p, 4),
             })
     return rows
 

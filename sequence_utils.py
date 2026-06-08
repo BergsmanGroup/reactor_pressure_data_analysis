@@ -47,7 +47,8 @@ def convert_sequence(valve_sequence: list) -> dict:
             continue
         cycle_count = int(row[0])
         valve_num   = int(row[1])
-        timing      = list(row[2:])   # 7 values, one per PHASE_TYPES slot
+        timing_vals = list(row[2:2 + len(PHASE_TYPES)])
+        timing      = timing_vals + [0] * (len(PHASE_TYPES) - len(timing_vals))
 
         if cycle_count == 0:
             # Additional valve appended to the current sequence
@@ -139,7 +140,11 @@ def make_cycle_seq_map(seq_dict: dict) -> dict:
     """
     mapping: dict = {}
     global_cycle = 1
-    for seq_key in sorted(seq_dict.keys()):
+    def _seq_sort_key(name: str):
+        m = re.fullmatch(r"seq(\d+)", str(name))
+        return int(m.group(1)) if m else float("inf")
+
+    for seq_key in sorted(seq_dict.keys(), key=_seq_sort_key):
         n = seq_dict[seq_key].get("cycles", 0)
         for _ in range(n):
             mapping[global_cycle] = seq_key
