@@ -310,9 +310,18 @@ class ReactorApp(tk.Tk):
             )
 
     def _format_recipe_preview(self, csv_path: str, out_path: str, payload: dict) -> str:
-        details_json = json.dumps(payload.get("experimentalDetails", {}), indent=2)
+        details_value = payload.get("experimentalDetails", "")
+        if isinstance(details_value, str):
+            try:
+                parsed = json.loads(details_value)
+            except (TypeError, ValueError):
+                details_json = details_value
+            else:
+                details_json = json.dumps(parsed, indent=2)
+        else:
+            details_json = json.dumps(details_value, indent=2)
         recipe_rows = payload.get("recipe", [])
-        data_row_count = max(len(recipe_rows) - 1, 0)
+        data_row_count = len(recipe_rows)
         return (
             f"Recipe sheet:\n{csv_path}\n\n"
             f"Output JSON:\n{out_path}\n\n"

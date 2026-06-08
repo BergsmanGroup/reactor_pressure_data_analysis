@@ -146,7 +146,8 @@ def extract_timing_table(
         raise ValueError("Could not find the timing table header row starting with 'Cycles'.")
 
     start_idx = int(header_rows[0])
-    timing_df = timing_df.iloc[start_idx:, :].copy()
+    # Exclude the header row itself; payload should contain only timing data rows.
+    timing_df = timing_df.iloc[start_idx + 1 :, :].copy()
     timing_df = timing_df.loc[
         timing_df.apply(lambda row: any(_clean_cell(value) for value in row), axis=1)
     ]
@@ -170,11 +171,16 @@ def build_payload(
     base_username, header_details = extract_header_details(df)
     payload_details = header_details if details is None else details
     payload_username = username if username is not None else build_username(base_username, payload_details)
+    if isinstance(payload_details, str):
+        details_text = payload_details
+    else:
+        # LabVIEW expects this field to be text, so encode non-string values.
+        details_text = json.dumps(payload_details, ensure_ascii=False, separators=(",", ":"))
 
     return {
         "recipe": extract_timing_table(df, rows=rows, cols=cols),
         "username": payload_username,
-        "experimentalDetails": payload_details,
+        "experimentalDetails": details_text,
     }
 
 
