@@ -16,6 +16,7 @@ import os
 import re
 import json
 import subprocess
+import hashlib
 from pathlib import Path
 
 import matplotlib
@@ -33,7 +34,7 @@ from sequence_utils import (
 )
 from data_parser import (
     read_header, stream_pressure, subtract_baseline,
-    condense_log, condensed_path,
+    condense_log, condensed_path, is_condensed_file,
 )
 from plot_utils  import (
     build_segments,
@@ -80,6 +81,16 @@ class ReactorApp(tk.Tk):
         self._valve_name_vars: dict = {}   # {valve_num_int: tk.StringVar}
         self._cached:          dict = {}   # populated after a processing run
         self._recipe_payload:  dict = {}
+        self._settings_path = Path(__file__).with_name("gui_processing_state.json")
+        self._settings_state: dict = {
+            "last_processing_settings": {},
+            "valve_names_by_header": {},
+            "valve_names_by_set": {},
+            "last_valve_names": {},
+        }
+
+        self._load_settings_state()
+        self._apply_last_processing_settings()
 
         self._build_ui()
 
@@ -179,6 +190,10 @@ class ReactorApp(tk.Tk):
         # -- Log ---------------------------------------------------------------
         log_frame = ttk.LabelFrame(parent, text="Log", padding=6)
         log_frame.pack(fill="both", expand=True, padx=10, pady=(2, 10))
+        log_toolbar = ttk.Frame(log_frame)
+        log_toolbar.pack(fill="x", anchor="e")
+        ttk.Button(log_toolbar, text="Clear Log",
+                   command=self._clear_log).pack(side="right")
         self._log_box = scrolledtext.ScrolledText(
             log_frame, height=10, state="disabled",
             font=("Consolas", 9), wrap="word")
@@ -226,6 +241,11 @@ class ReactorApp(tk.Tk):
             self._log_box.see("end")
             self._log_box.config(state="disabled")
         self.after(0, _do)
+
+    def _clear_log(self):
+        self._log_box.config(state="normal")
+        self._log_box.delete("1.0", "end")
+        self._log_box.config(state="disabled")
 
     def _set_progress(self, pct: float):
         self.after(0, lambda: (
@@ -330,6 +350,133 @@ class ReactorApp(tk.Tk):
             f"Timing rows captured: {data_row_count}"
         )
 
+    def _load_settings_state(self):
+        if not self._settings_path.exists():
+            return
+        try:
+            with self._settings_path.open("r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception:
+            return
+
+        if not isinstance(data, dict):
+            return
+
+        last = data.get("last_processing_settings", {})
+        by_header = data.get("valve_names_by_header", {})
+        by_set = data.get("valve_names_by_set", {})
+        last_valves = data.get("last_valve_names", {})
+
+        if isinstance(by_header, dict) and not isinstance(last_valves, dict):
+            last_valves = {}
+        if isinstance(by_header, dict) and not last_valves and by_header:
+            # Backward-compatibility: recover a fallback mapping from older state
+            # files that only persisted valve names by header hash.
+            try:
+                candidate = next(reversed(by_header.values()))
+                if isinstance(candidate, dict):
+                    last_valves = candidate
+            except Exception:
+                pass
+
+        self._settings_state = {
+            "last_processing_settings": last if isinstance(last, dict) else {},
+            "valve_names_by_header": by_header if isinstance(by_header, dict) else {},
+            "valve_names_by_set": by_set if isinstance(by_set, dict) else {},
+            "last_valve_names": last_valves if isinstance(last_valves, dict) else {},
+        }
+
+    def _save_settings_state(self):
+        try:
+            with self._settings_path.open("w", encoding="utf-8") as fh:
+                json.dump(self._settings_state, fh, ensure_ascii=False, indent=2)
+        except Exception as exc:
+            self._log(f"WARNING: could not save GUI settings: {exc}")
+
+    def _apply_last_processing_settings(self):
+        last = self._settings_state.get("last_processing_settings", {})
+        if not isinstance(last, dict):
+            return
+
+        xlim = last.get("xlim")
+        ylim = last.get("ylim")
+        shift = last.get("shift")
+        wait_time = last.get("wait_time")
+        fps = last.get("fps")
+        if xlim is not None:
+            self._xlim_var.set(str(xlim))
+        if ylim is not None:
+            self._ylim_var.set(str(ylim))
+        if shift is not None:
+            self._shift_var.set(str(shift))
+        if wait_time is not None:
+            self._wait_var.set(str(wait_time))
+        if fps is not None:
+            self._fps_var.set(str(fps))
+
+    def _header_settings_key(self) -> str:
+        if not self._seq_dict:
+            return ""
+        canonical = json.dumps(self._seq_dict, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha1(canonical.encode("utf-8")).hexdigest()
+
+    def _valve_set_key(self) -> str:
+        valves = sorted(int(v) for v in self._valve_name_vars.keys())
+        return "|".join(str(v) for v in valves)
+
+    def _apply_saved_valve_names(self):
+        key = self._header_settings_key()
+        by_header = self._settings_state.get("valve_names_by_header", {})
+        by_set = self._settings_state.get("valve_names_by_set", {})
+        last_valves = self._settings_state.get("last_valve_names", {})
+
+        saved = {}
+        if key:
+            saved = by_header.get(key, {})
+        if not saved:
+            saved = by_set.get(self._valve_set_key(), {})
+        if not saved:
+            saved = last_valves
+        if not isinstance(saved, dict):
+            return
+
+        for vnum, var in self._valve_name_vars.items():
+            val = saved.get(str(vnum))
+            if val is not None:
+                var.set(str(val))
+
+    def _persist_processing_preferences(self, valve_names: dict):
+        self._settings_state["last_processing_settings"] = {
+            "xlim": self._xlim_var.get().strip(),
+            "ylim": self._ylim_var.get().strip(),
+            "shift": self._shift_var.get().strip(),
+            "wait_time": self._wait_var.get().strip(),
+            "fps": self._fps_var.get().strip(),
+        }
+
+        names_payload = {
+            str(vnum): str(name)
+            for vnum, name in valve_names.items()
+        }
+
+        key = self._header_settings_key()
+        if key:
+            self._settings_state.setdefault("valve_names_by_header", {})[key] = names_payload
+
+        self._settings_state.setdefault("valve_names_by_set", {})[
+            self._valve_set_key()
+        ] = names_payload
+        self._settings_state["last_valve_names"] = names_payload
+
+        self._save_settings_state()
+
+    def _default_output_dir_for_file(self, file_path: str) -> str:
+        p = Path(file_path)
+        m = re.match(r"^(\d{6}_\d{2}h\d{2}m)", p.stem)
+        suffix = m.group(1) if m else ""
+        folder = f"cycle_plots_{suffix}" if suffix else "cycle_plots"
+        return str(p.parent / folder)
+
     # =========================================================================
     #  File browsing
     # =========================================================================
@@ -340,7 +487,7 @@ class ReactorApp(tk.Tk):
             filetypes=[("JSON files", "*.json"), ("All files", "*.*")])
         if path:
             self._file_path.set(path)
-            self._output_dir.set(os.path.join(os.path.dirname(path), "cycle_plots"))
+            self._output_dir.set(self._default_output_dir_for_file(path))
 
     def _browse_output(self):
         path = filedialog.askdirectory(title="Select Output Directory")
@@ -455,6 +602,8 @@ class ReactorApp(tk.Tk):
             self._log(f"  {sk}: {sd['cycles']} cycles -- {', '.join(valves)}")
 
         self._populate_valve_fields()
+        self._apply_saved_valve_names()
+        self._apply_last_processing_settings()
         self._process_btn.config(state="normal")
 
     def _populate_valve_fields(self):
@@ -518,6 +667,8 @@ class ReactorApp(tk.Tk):
         shift       = self._get_float(self._shift_var,  default=0.0)
         wait_time   = self._get_float(self._wait_var,   default=0.0)
 
+        self._persist_processing_preferences(valve_names)
+
         self._process_btn.config(state="disabled")
         self._preview_btn.config(state="disabled")
         self._set_progress(0)
@@ -558,22 +709,71 @@ class ReactorApp(tk.Tk):
             self._log(f"  {len(cycle_points)} cycles, "
                       f"{sum(len(v) for v in cycle_points.values()):,} pressure points")
 
-            # -- Write condensed log (skip if the input IS already condensed) ----
-            cpath = condensed_path(path)
-            if Path(path).resolve() != Path(cpath).resolve():
-                self._log("Writing condensed log...")
-                try:
-                    condensed_out = str(cpath)
-                    n_rows = self._run_save_with_retry(
-                        lambda: condense_log(path, condensed_out),
+            # -- Write condensed log (always refresh, even for condensed input) ---
+            is_input_condensed = is_condensed_file(path)
+            cpath = Path(path) if is_input_condensed else condensed_path(path)
+            self._log("Writing condensed log...")
+            try:
+                condensed_out = str(cpath)
+
+                def _fmt_bytes(nbytes: int) -> str:
+                    units = ["B", "KB", "MB", "GB", "TB"]
+                    size = float(max(nbytes, 0))
+                    idx = 0
+                    while size >= 1024.0 and idx < len(units) - 1:
+                        size /= 1024.0
+                        idx += 1
+                    return f"{size:.2f} {units[idx]}"
+
+                def _format_phase_for_step(phase_name: str) -> str:
+                    parts = phase_name.split("_")
+                    if parts:
+                        parts[-1] = parts[-1].capitalize()
+                    return "_".join(parts)
+
+                def _phase_lookup(cycle, time_s, raw_step, payload):
+                    seq_key = cyc_seq_map.get(cycle)
+                    if not seq_key:
+                        return None
+                    bins = phased_seq.get(seq_key, {}).get("phase_bins", [])
+                    names = phased_seq.get(seq_key, {}).get("phase_names", [])
+                    if not bins or not names:
+                        return None
+                    t0 = cycle_start_map.get(cycle)
+                    if t0 is None:
+                        return None
+                    phase = assign_phase(time_s - t0, bins, names)
+                    if not phase:
+                        return None
+                    return _format_phase_for_step(phase)
+
+                stats = self._run_save_with_retry(
+                    lambda: condense_log(
+                        path,
                         condensed_out,
-                        "condensed log",
-                    )
-                    self._log(f"  Condensed: {Path(cpath).name}  ({n_rows:,} data rows)")
-                except SaveAbortedError:
-                    self._log("  Condensed log save cancelled.")
-                except Exception as exc:
-                    self._log(f"  WARNING: could not write condensed log: {exc}")
+                        phase_lookup=_phase_lookup,
+                        return_stats=True,
+                    ),
+                    condensed_out,
+                    "condensed log",
+                )
+                self._log(
+                    f"  Raw rows before condense: {stats['total_rows']:,} total, "
+                    f"{stats['pressure_rows']:,} pressure"
+                )
+                self._log(
+                    f"  File size: {_fmt_bytes(stats['input_size_bytes'])} -> "
+                    f"{_fmt_bytes(stats['output_size_bytes'])} "
+                    f"({stats['size_reduction_pct']:.1f}% reduction)"
+                )
+                self._log(
+                    f"  Condensed: {Path(cpath).name}  "
+                    f"({stats['rows_written']:,} data rows)"
+                )
+            except SaveAbortedError:
+                self._log("  Condensed log save cancelled.")
+            except Exception as exc:
+                self._log(f"  WARNING: could not write condensed log: {exc}")
 
             # -- Baseline correction ----------------------------------------------
             cycle_points, baseline = subtract_baseline(cycle_points)
@@ -583,7 +783,8 @@ class ReactorApp(tk.Tk):
             max_ct, max_p = compute_axis_limits(cycle_points, cycle_start_map)
             xlim_val = xlim if xlim else max_ct
             ylim_val = ylim if ylim else max_p
-            filename = Path(path).stem
+            stem = Path(path).stem
+            filename = stem[:-len("_condensed")] if stem.endswith("_condensed") else stem
 
             # -- Phase color map --------------------------------------------------
             all_phase_names: list[str] = []
@@ -823,3 +1024,12 @@ class ReactorApp(tk.Tk):
             state="normal" if idx < len(cycles_sorted) - 1 else "disabled",
             command=lambda: _go(cycles_sorted[min(idx + 1, len(cycles_sorted) - 1)]),
         ).pack(side="left", padx=8)
+
+
+def main():
+    app = ReactorApp()
+    app.mainloop()
+
+
+if __name__ == "__main__":
+    main()
