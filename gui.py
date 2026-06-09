@@ -45,6 +45,7 @@ from plot_utils  import (
     save_exposure_csv,
     build_animation,
 )
+from ise_utils import save_ise_thickness_csv
 from convert_to_json import load_table, build_payload, convert_recipe_sheet
 
 
@@ -70,7 +71,9 @@ class ReactorApp(tk.Tk):
         self._shift_var         = tk.StringVar(value="0")
         self._wait_var          = tk.StringVar(value="0")
         self._fps_var           = tk.StringVar(value="5")
+        self._thickness_blank_rows_var = tk.StringVar(value="0")
         self._preview_cycle_var = tk.StringVar(value="1")
+        self._ise_file_path     = tk.StringVar()
         self._recipe_sheet_path = tk.StringVar()
         self._recipe_output_path = tk.StringVar()
         self._recipe_status_var = tk.StringVar(value="Load a recipe sheet to preview the payload.")
@@ -123,6 +126,16 @@ class ReactorApp(tk.Tk):
         ttk.Button(file_frame, text="Open File Location",
                    command=self._open_raw_file_location).pack(side="left")
 
+        # -- iSE thickness source file ----------------------------------------
+        ise_frame = ttk.LabelFrame(parent, text="iSE Data File", padding=8)
+        ise_frame.pack(fill="x", **pad)
+        ttk.Entry(ise_frame, textvariable=self._ise_file_path, width=54).pack(
+            side="left", expand=True, fill="x", padx=(0, 4))
+        ttk.Button(ise_frame, text="Browse...", command=self._browse_ise_file).pack(
+            side="left", padx=(0, 4))
+        ttk.Button(ise_frame, text="Open File Location",
+                   command=self._open_ise_file_location).pack(side="left")
+
         # -- Valve names (populated after header load) -------------------------
         self._valve_frame = ttk.LabelFrame(parent, text="Valve Names (from recipe)", padding=8)
         self._valve_frame.pack(fill="x", **pad)
@@ -148,6 +161,7 @@ class ReactorApp(tk.Tk):
             ("Phase shift (s):", 1, 0, self._shift_var),
             ("Wait time (s):",   2, 0, self._wait_var),
             ("Anim FPS:",        3, 0, self._fps_var),
+            ("Thickness blank rows:", 4, 0, self._thickness_blank_rows_var),
         ]
         for label_text, row, col, var in _opts:
             ttk.Label(plot_frame, text=label_text).grid(
@@ -403,6 +417,7 @@ class ReactorApp(tk.Tk):
         shift = last.get("shift")
         wait_time = last.get("wait_time")
         fps = last.get("fps")
+        thickness_blank_rows = last.get("thickness_blank_rows")
         if xlim is not None:
             self._xlim_var.set(str(xlim))
         if ylim is not None:
@@ -413,6 +428,8 @@ class ReactorApp(tk.Tk):
             self._wait_var.set(str(wait_time))
         if fps is not None:
             self._fps_var.set(str(fps))
+        if thickness_blank_rows is not None:
+            self._thickness_blank_rows_var.set(str(thickness_blank_rows))
 
     def _header_settings_key(self) -> str:
         if not self._seq_dict:
@@ -452,6 +469,7 @@ class ReactorApp(tk.Tk):
             "shift": self._shift_var.get().strip(),
             "wait_time": self._wait_var.get().strip(),
             "fps": self._fps_var.get().strip(),
+            "thickness_blank_rows": self._thickness_blank_rows_var.get().strip(),
         }
 
         names_payload = {
@@ -494,6 +512,14 @@ class ReactorApp(tk.Tk):
         if path:
             self._output_dir.set(path)
 
+    def _browse_ise_file(self):
+        path = filedialog.askopenfilename(
+            title="Select iSE Data CSV",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if path:
+            self._ise_file_path.set(path)
+
     def _browse_recipe_sheet(self):
         path = filedialog.askopenfilename(
             title="Select Recipe Sheet",
@@ -506,6 +532,9 @@ class ReactorApp(tk.Tk):
 
     def _open_raw_file_location(self):
         self._open_path_in_explorer(self._file_path.get(), "raw data file")
+
+    def _open_ise_file_location(self):
+        self._open_path_in_explorer(self._ise_file_path.get(), "iSE data file")
 
     def _open_recipe_file_location(self):
         target = self._recipe_output_path.get() or self._recipe_sheet_path.get()
@@ -841,6 +870,36 @@ class ReactorApp(tk.Tk):
                 "exposure CSV",
             )
             self._log(f"  Exposure CSV: {Path(csv_path).name}  ({len(exp_rows)} rows)")
+
+            # -- iSE thickness CSV -----------------------------------------------
+            try:
+                ise_path = self._ise_file_path.get().strip()
+                if ise_path and Path(ise_path).is_file():
+                    ise_src = Path(ise_path)
+                    try:
+                        thickness_blank_rows = max(0, int(self._thickness_blank_rows_var.get().strip() or "0"))
+                    except ValueError:
+                        thickness_blank_rows = 0
+                    thickness_path = os.path.join(out_dir, f"{filename}_thickness.csv")
+                    n_thickness = self._run_save_with_retry(
+                        lambda: save_ise_thickness_csv(
+                            ise_src,
+                            thickness_path,
+                            blank_rows=thickness_blank_rows,
+                        ),
+                        thickness_path,
+                        "thickness CSV",
+                    )
+                    self._log(
+                        f"  Thickness CSV: {Path(thickness_path).name} "
+                        f"({n_thickness} rows from {ise_src.name})"
+                    )
+                else:
+                    self._log("  Thickness CSV: skipped (select a valid iSE data file)")
+            except SaveAbortedError:
+                self._log("  Thickness CSV save cancelled.")
+            except Exception as exc:
+                self._log(f"  WARNING: could not extract iSE thickness CSV: {exc}")
 
             # Cache for interactive preview
             self._cached = dict(

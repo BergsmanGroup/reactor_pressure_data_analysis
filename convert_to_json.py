@@ -16,6 +16,16 @@ HEADER_KEY_MAP = {
     "Name": "Name",
     "Temperature (C)": "TempC",
     "Temperature (C) ": "TempC",
+    "Substrate": "Substrate",
+    "Preexisting layer": "PreexistingLayer",
+    "Preexisting layers": "PreexistingLayer",
+    "Thickness": "PreexistingThickness",
+    "Thicknesses": "PreexistingThickness",
+    "Start time": "StartTime",
+    "Process time (hr)": "ProcessTimeHr",
+    "Process time (hours)": "ProcessTimeHr",
+    "End time": "EndTime",
+    "End time (datetime)": "EndTime",
 }
 
 
@@ -76,7 +86,11 @@ def extract_header_details(df: pd.DataFrame) -> tuple[str, dict]:
     details: dict = {}
     username_base = ""
 
-    header_df = df.iloc[:11, :].fillna("").astype(str)
+    norm_col0 = df.iloc[:, 0].fillna("").astype(str).map(_clean_cell)
+    cycles_rows = norm_col0[norm_col0 == "Cycles"].index
+    stop_idx = int(cycles_rows[0]) if len(cycles_rows) else df.shape[0]
+
+    header_df = df.iloc[:stop_idx, :].fillna("").astype(str)
     for _, row in header_df.iterrows():
         label = _clean_cell(row.iloc[0])
         if not label:
@@ -87,7 +101,7 @@ def extract_header_details(df: pd.DataFrame) -> tuple[str, dict]:
             username_base = _parse_header_value(label, values)
             continue
 
-        mapped = HEADER_KEY_MAP.get(label)
+        mapped = HEADER_KEY_MAP.get(label) or HEADER_KEY_MAP.get(label.rstrip())
         if not mapped:
             continue
         details[mapped] = _parse_header_value(label, values)
@@ -161,6 +175,61 @@ def extract_timing_table(
     return timing_df.values.tolist()
 
 
+def _to_float(value) -> float:
+    try:
+        token = _clean_cell(value)
+        return float(token) if token else 0.0
+    except ValueError:
+        return 0.0
+
+
+def _estimate_process_times(df: pd.DataFrame, details: dict) -> dict:
+    """
+    Compute total process time from timing rows and estimate end time.
+
+    Sequence duration is the sum of phase columns (index 2..8) across all
+    valve rows in the sequence, multiplied by the sequence cycle count.
+    """
+    recipe_rows = extract_timing_table(df)
+
+    total_seconds = 0.0
+    current_cycles = 0.0
+    current_seq_seconds = 0.0
+
+    def _commit_sequence():
+        nonlocal total_seconds, current_cycles, current_seq_seconds
+        if current_cycles > 0:
+            total_seconds += current_cycles * current_seq_seconds
+        current_cycles = 0.0
+        current_seq_seconds = 0.0
+
+    for row in recipe_rows:
+        cycle_cell = _clean_cell(row[0]) if len(row) > 0 else ""
+        if cycle_cell:
+            _commit_sequence()
+            current_cycles = _to_float(cycle_cell)
+
+        phase_vals = row[2:9] if len(row) >= 9 else row[2:]
+        current_seq_seconds += sum(_to_float(v) for v in phase_vals)
+
+    _commit_sequence()
+
+    process_hours = round(total_seconds / 3600.0, 6)
+    out = {"ProcessTimeHr": process_hours}
+
+    start_raw = details.get("StartTime", "") if isinstance(details, dict) else ""
+    if isinstance(start_raw, list):
+        start_raw = next((x for x in start_raw if _clean_cell(x)), "")
+    start_text = _clean_cell(start_raw)
+    if start_text:
+        start_dt = pd.to_datetime(start_text, errors="coerce")
+        if pd.notna(start_dt):
+            end_dt = start_dt + pd.to_timedelta(total_seconds, unit="s")
+            out["EndTime"] = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    return out
+
+
 def build_payload(
     df: pd.DataFrame,
     username: str | None = None,
@@ -169,7 +238,16 @@ def build_payload(
     cols: int | None = None,
 ) -> dict:
     base_username, header_details = extract_header_details(df)
-    payload_details = header_details if details is None else details
+    if details is None:
+        payload_details = dict(header_details)
+    elif isinstance(details, dict):
+        payload_details = dict(details)
+    else:
+        payload_details = details
+
+    if isinstance(payload_details, dict):
+        payload_details.update(_estimate_process_times(df, payload_details))
+
     payload_username = username if username is not None else build_username(base_username, payload_details)
     if isinstance(payload_details, str):
         details_text = payload_details

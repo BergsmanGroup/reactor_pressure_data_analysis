@@ -1,0 +1,56 @@
+﻿User/File Name Info,Jay&TDIC&ED&Sat&Purge&Curve,,,,,,,
+Info,ED saturates at very low dose pressures. 0.25s dose is enough to saturate the surface over 300s. Change approach to dose 0.25s and hold for a variable amount of time. Trial run with 1 cycle per sequence and 150s purge to observe increase in GPC starting below the saturation point. ,,,,,,,
+Wait time,0,,,,,,,
+EDR,TRUE,,,,,,,
+DID,117,,,,,,,
+SID,152,,,,,,,
+EID,28,,,,,,,
+PID,4,,,,,,,
+Valve/precursor,Chamber,7,12,5,6,,,
+Name,Chamber,iSE,LeakRate,TDIC,ED,,,
+Temperature (C) ,25,25,25,25,25,,,
+Substrate,Silicon wafer,,,,,,,
+Preexisting layer,SiO2,Polyurea,,,,,,
+Thickness,19.01,143.37,,,,,,
+Start time,6/6/2026 16:00,,,,,,,
+Process time (hr),,,,,,,,
+End time,,,,,,,,
+,,,,,,,,
+Cycles,Valve,PrePurge,N2Dose,PumpDose,Dose,Hold,PrePurge,Purge
+1,7,0,15,0,0,0,0,10
+5,5,4,0,0,300,0,0,300
+,6,4,0,0,0.25,0.25,0,150
+,12,10,0,0,0,60,0,5
+,7,0,15,0,0,0,0,10
+5,5,4,0,0,300,0,0,300
+,6,4,0,0,2,298,0,300
+,12,10,0,0,0,60,0,5
+,7,0,15,0,0,0,0,10
+5,5,4,0,0,300,0,0,300
+,6,4,0,0,4,296,0,300
+,12,10,0,0,0,60,0,5
+,7,0,15,0,0,0,0,10
+5,5,4,0,0,300,0,0,300
+,6,4,0,0,8,292,0,300
+,12,10,0,0,0,60,0,5
+,7,0,15,0,0,0,0,10
+5,5,4,0,0,300,0,0,300
+,6,4,0,0,16,284,0,300
+,12,10,0,0,0,60,0,5
+,7,0,15,0,0,0,0,10
+5,5,4,0,0,300,0,0,300
+,6,4,0,0,32,268,0,300
+,12,10,0,0,0,60,0,5
+,7,0,15,0,0,0,0,10
+5,5,4,0,0,300,0,0,300
+,6,4,0,0,64,236,0,300
+,12,10,0,0,0,60,0,5
+,7,0,15,0,0,0,0,10
+5,5,4,0,0,300,0,0,300
+,6,4,0,0,128,172,0,300
+,12,10,0,0,0,60,0,5
+,7,0,15,0,0,0,0,10
+5,5,4,0,0,300,0,0,300
+,6,4,0,0,128,172,0,300
+,12,10,0,0,0,60,0,5
+,7,0,15,0,0,0,0,10

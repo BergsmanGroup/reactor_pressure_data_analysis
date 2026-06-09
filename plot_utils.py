@@ -202,9 +202,35 @@ def compute_exposure_table(
     For every cycle, compute trapezoidal exposure over only the ``dose`` and
     ``hold`` phases, combined into one integration per sequence/valve label.
 
-    Returns a list of dicts with keys:
-        cycle, phase, exposure_mTorr_s, duration_s, mean_pressure_mTorr
+    If a sequence contains a valve named ``LeakRate``, the row also includes
+    ``LeakRate_leak_rate`` computed from the full dose+hold pressure change
+    divided by the total exposure duration.
+
+    Returns a list of dicts, one row per sequence index (zero-based).
+    Each row contains dynamic columns per valve label:
+        <valve>_nominal_dose, <valve>_nominal_hold, <valve>_nominal_duration,
+        <valve>_exposure, <valve>_mean_pressure, <valve>_leak_rate
     """
+    if not cycles_sorted:
+        return []
+
+    cycle_zero = min(cycles_sorted)
+
+    nominal_map: dict = {}
+    for seq_key, seq_data in phased_seq.items():
+        for key, timing in seq_data.items():
+            if not str(key).startswith("valve"):
+                continue
+            vals = list(timing) if isinstance(timing, (list, tuple)) else []
+            dose = float(vals[3]) if len(vals) > 3 else 0.0
+            hold = float(vals[4]) if len(vals) > 4 else 0.0
+            label = str(key)[len("valve"):]
+            nominal_map[f"{seq_key}_{label}"] = {
+                "nominal_dose": dose,
+                "nominal_hold": hold,
+                "nominal_duration": dose + hold,
+            }
+
     rows = []
     for cycle in cycles_sorted:
         segs = build_segments(
@@ -238,19 +264,52 @@ def compute_exposure_table(
             bucket["exposure"] += exposure
             bucket["duration"] += duration
 
-        for phase_head, vals in grouped.items():
+        row = {"sequence": int(cycle - cycle_zero)}
+        has_nonzero_exposure = False
+
+        for phase_head, vals in sorted(grouped.items()):
             total_exposure = vals["exposure"]
             total_duration = vals["duration"]
             if total_duration <= 0:
                 continue
             mean_p = total_exposure / total_duration
-            rows.append({
-                "cycle":               cycle,
-                "phase":               f"{phase_head}_dose_hold",
-                "exposure_mTorr_s":    round(total_exposure, 4),
-                "duration_s":          round(total_duration, 4),
-                "mean_pressure_mTorr": round(mean_p, 4),
-            })
+            if total_exposure == 0:
+                continue
+            nominal = nominal_map.get(
+                phase_head,
+                {"nominal_dose": 0.0, "nominal_hold": 0.0, "nominal_duration": 0.0},
+            )
+            valve_label = phase_head.split("_", 1)[1] if "_" in phase_head else phase_head
+            col = valve_label.replace(" ", "_")
+
+            row[f"{col}_nominal_dose"] = round(nominal["nominal_dose"], 6)
+            row[f"{col}_nominal_hold"] = round(nominal["nominal_hold"], 6)
+            row[f"{col}_nominal_duration"] = round(nominal["nominal_duration"], 6)
+            row[f"{col}_exposure"] = round(total_exposure, 4)
+            row[f"{col}_mean_pressure"] = round(mean_p, 4)
+            if valve_label == "LeakRate":
+                exposure_times = []
+                exposure_pressures = []
+                for tail in ("dose", "hold"):
+                    seg = segs.get(f"{phase_head}_{tail}")
+                    if not seg:
+                        continue
+                    times_part, pressures_part = seg
+                    exposure_times.extend(times_part)
+                    exposure_pressures.extend(pressures_part)
+                if len(exposure_times) >= 2:
+                    total_exposure_time = exposure_times[-1] - exposure_times[0]
+                    if total_exposure_time > 0:
+                        leak_rate = (
+                            exposure_pressures[0] - exposure_pressures[-1]
+                        ) / total_exposure_time
+                        row[f"{col}_leak_rate"] = round(leak_rate, 4)
+            has_nonzero_exposure = True
+
+        if has_nonzero_exposure:
+            rows.append(row)
+
+    rows.sort(key=lambda r: r["sequence"])
     return rows
 
 
@@ -260,10 +319,36 @@ def save_exposure_csv(rows: list, out_dir: str, stem: str) -> str:
     """
     import csv
     out_path = os.path.join(out_dir, f"{stem}_exposure.csv")
-    fieldnames = [
-        "cycle", "phase",
-        "exposure_mTorr_s", "duration_s", "mean_pressure_mTorr",
+
+    valve_prefixes = set()
+    suffixes = [
+        "_nominal_dose",
+        "_nominal_hold",
+        "_nominal_duration",
+        "_exposure",
+        "_mean_pressure",
+        "_leak_rate",
     ]
+    for row in rows:
+        for key in row.keys():
+            if key == "sequence":
+                continue
+            for suffix in suffixes:
+                if key.endswith(suffix):
+                    valve_prefixes.add(key[: -len(suffix)])
+                    break
+
+    fieldnames = ["sequence"]
+    for prefix in sorted(valve_prefixes):
+        fieldnames.extend([
+            f"{prefix}_nominal_dose",
+            f"{prefix}_nominal_hold",
+            f"{prefix}_nominal_duration",
+            f"{prefix}_exposure",
+            f"{prefix}_mean_pressure",
+            f"{prefix}_leak_rate",
+        ])
+
     with open(out_path, "w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=fieldnames)
         w.writeheader()
