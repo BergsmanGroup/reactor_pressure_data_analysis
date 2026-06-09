@@ -3,8 +3,9 @@
     "xlim": "auto",
     "ylim": "auto",
     "shift": "2",
-    "wait_time": "1800",
+    "wait_time": "0",
     "fps": "5",
+    "leakrate_phase_reduction": "0",
     "thickness_blank_rows": "0"
   },
   "valve_names_by_header": {
@@ -36,6 +37,15 @@
       "5": "TDIC",
       "6": "ED",
       "7": "iSE"
+    },
+    "e93f5c088e1e4e5eec612184503936deb3208717": {
+      "6": "ED"
+    },
+    "13bf79ae8eac5fe5fd1e022dc7a1f670afe5372b": {
+      "5": "TDIC",
+      "6": "ED",
+      "7": "iSE",
+      "12": "LeakRate"
     }
   },
   "valve_names_by_set": {
@@ -49,11 +59,15 @@
       "5": "TDIC",
       "6": "ED",
       "7": "iSE"
+    },
+    "6": {
+      "6": "ED"
     }
   },
   "last_valve_names": {
     "5": "TDIC",
     "6": "ED",
-    "7": "iSE"
+    "7": "iSE",
+    "12": "LeakRate"
   }
 }

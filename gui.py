@@ -47,6 +47,7 @@ from plot_utils  import (
 )
 from ise_utils import save_ise_thickness_csv
 from convert_to_json import load_table, build_payload, convert_recipe_sheet
+from header_editor import open_header_editor
 
 
 class SaveAbortedError(Exception):
@@ -124,6 +125,10 @@ class ReactorApp(tk.Tk):
             side="left", expand=True, fill="x", padx=(0, 4))
         ttk.Button(file_frame, text="Browse...",    command=self._browse_file  ).pack(side="left", padx=(0, 4))
         ttk.Button(file_frame, text="Load Header",  command=self._load_header  ).pack(side="left", padx=(0, 4))
+        self._edit_header_btn = ttk.Button(
+            file_frame, text="Edit Header...", command=self._edit_header, state="disabled"
+        )
+        self._edit_header_btn.pack(side="left", padx=(0, 4))
         ttk.Button(file_frame, text="Open File Location",
                    command=self._open_raw_file_location).pack(side="left")
 
@@ -353,9 +358,9 @@ class ReactorApp(tk.Tk):
             except (TypeError, ValueError):
                 details_json = details_value
             else:
-                details_json = json.dumps(parsed, indent=2)
+                details_json = self._format_header_details(parsed)
         else:
-            details_json = json.dumps(details_value, indent=2)
+            details_json = self._format_header_details(details_value)
         recipe_rows = payload.get("recipe", [])
         data_row_count = len(recipe_rows)
         return (
@@ -365,6 +370,63 @@ class ReactorApp(tk.Tk):
             f"experimentalDetails:\n{details_json}\n\n"
             f"Timing rows captured: {data_row_count}"
         )
+
+    def _format_header_details(self, details_value) -> str:
+        def _format_value(value, level: int = 0) -> str:
+            indent = "  " * level
+            next_indent = "  " * (level + 1)
+
+            if isinstance(value, dict):
+                if not value:
+                    return "{}"
+                lines = ["{"]
+                items = list(value.items())
+                for index, (key, child) in enumerate(items):
+                    rendered = _format_value(child, level + 1)
+                    if "\n" in rendered:
+                        rendered = "\n".join(
+                            f"{next_indent}{line}" if line else line
+                            for line in rendered.splitlines()
+                        )
+                    comma = "," if index < len(items) - 1 else ""
+                    lines.append(f"{next_indent}{json.dumps(key, ensure_ascii=False)}: {rendered}{comma}")
+                lines.append(f"{indent}}}")
+                return "\n".join(lines)
+
+            if isinstance(value, list):
+                return json.dumps(value, ensure_ascii=False)
+
+            return json.dumps(value, ensure_ascii=False)
+
+        if isinstance(details_value, str):
+            text = details_value.strip()
+            if not text:
+                return ""
+            try:
+                parsed = json.loads(text)
+            except (TypeError, ValueError):
+                return text
+            return _format_value(parsed)
+
+        if isinstance(details_value, dict):
+            return _format_value(details_value)
+
+        return str(details_value)
+
+    def _format_timing_table(self, seq_dict: dict) -> str:
+        lines = ["Timing table:"]
+        for seq_key, seq_data in seq_dict.items():
+            cycles = seq_data.get("cycles", "")
+            lines.append(f"  {seq_key} (cycles: {cycles})")
+            for key, value in seq_data.items():
+                if key == "cycles":
+                    continue
+                if isinstance(value, (list, tuple)):
+                    value_text = json.dumps(list(value), ensure_ascii=False)
+                else:
+                    value_text = str(value)
+                lines.append(f"    {key}: {value_text}")
+        return "\n".join(lines)
 
     def _load_settings_state(self):
         if not self._settings_path.exists():
@@ -635,7 +697,10 @@ class ReactorApp(tk.Tk):
         self._seq_dict = convert_sequence(vs)
 
         self._log(f"Loaded:  {self._header_info.get('username', '')}")
-        self._log(f"Details: {self._header_info.get('experimentalDetails', '')}")
+        details_text = self._format_header_details(self._header_info.get("experimentalDetails", ""))
+        if details_text:
+            self._log(f"Details:\n{details_text}")
+        self._log(self._format_timing_table(self._seq_dict))
         for sk, sd in self._seq_dict.items():
             valves = [k for k in sd if k.startswith("valve")]
             self._log(f"  {sk}: {sd['cycles']} cycles -- {', '.join(valves)}")
@@ -644,6 +709,47 @@ class ReactorApp(tk.Tk):
         self._apply_saved_valve_names()
         self._apply_last_processing_settings()
         self._process_btn.config(state="normal")
+        self._edit_header_btn.config(state="normal")
+
+    def _rewrite_header_payload(self, file_path: str, payload: dict):
+        path = Path(file_path)
+        with path.open("r", encoding="utf-8") as fh:
+            lines = fh.readlines()
+        if not lines:
+            raise ValueError("Raw data file is empty.")
+
+        first = json.loads(lines[0])
+        first["payload"] = payload
+        updated_lines = [json.dumps(first, ensure_ascii=False) + "\n"]
+        updated_lines.extend(lines[1:])
+
+        with path.open("w", encoding="utf-8", newline="") as fh:
+            fh.writelines(updated_lines)
+
+    def _edit_header(self):
+        path = self._file_path.get().strip()
+        if not path or not os.path.isfile(path):
+            self._log("ERROR: Select a valid file first.")
+            return
+        if not self._header_info:
+            try:
+                self._header_info = read_header(path)
+            except Exception as exc:
+                messagebox.showerror("Edit Header", f"Could not load header:\n\n{exc}", parent=self)
+                return
+
+        edited = open_header_editor(self, self._header_info)
+        if edited is None:
+            return
+
+        try:
+            self._rewrite_header_payload(path, edited)
+        except Exception as exc:
+            messagebox.showerror("Edit Header", f"Could not save header:\n\n{exc}", parent=self)
+            return
+
+        self._log("Header updated.")
+        self._load_header()
 
     def _populate_valve_fields(self):
         for w in self._valve_frame.winfo_children():
