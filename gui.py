@@ -71,6 +71,7 @@ class ReactorApp(tk.Tk):
         self._shift_var         = tk.StringVar(value="0")
         self._wait_var          = tk.StringVar(value="0")
         self._fps_var           = tk.StringVar(value="5")
+        self._leakrate_phase_reduction_var = tk.StringVar(value="0")
         self._thickness_blank_rows_var = tk.StringVar(value="0")
         self._preview_cycle_var = tk.StringVar(value="1")
         self._ise_file_path     = tk.StringVar()
@@ -161,7 +162,8 @@ class ReactorApp(tk.Tk):
             ("Phase shift (s):", 1, 0, self._shift_var),
             ("Wait time (s):",   2, 0, self._wait_var),
             ("Anim FPS:",        3, 0, self._fps_var),
-            ("Thickness blank rows:", 4, 0, self._thickness_blank_rows_var),
+            ("LeakRate phase reduction:", 4, 0, self._leakrate_phase_reduction_var),
+            ("Thickness blank rows:", 5, 0, self._thickness_blank_rows_var),
         ]
         for label_text, row, col, var in _opts:
             ttk.Label(plot_frame, text=label_text).grid(
@@ -417,7 +419,9 @@ class ReactorApp(tk.Tk):
         shift = last.get("shift")
         wait_time = last.get("wait_time")
         fps = last.get("fps")
+        leakrate_phase_reduction = last.get("leakrate_phase_reduction")
         thickness_blank_rows = last.get("thickness_blank_rows")
+        leakrate_phase_reduction = last.get("leakrate_phase_reduction")
         if xlim is not None:
             self._xlim_var.set(str(xlim))
         if ylim is not None:
@@ -428,8 +432,12 @@ class ReactorApp(tk.Tk):
             self._wait_var.set(str(wait_time))
         if fps is not None:
             self._fps_var.set(str(fps))
+        if leakrate_phase_reduction is not None:
+            self._leakrate_phase_reduction_var.set(str(leakrate_phase_reduction))
         if thickness_blank_rows is not None:
             self._thickness_blank_rows_var.set(str(thickness_blank_rows))
+        if leakrate_phase_reduction is not None:
+            self._leakrate_phase_reduction_var.set(str(leakrate_phase_reduction))
 
     def _header_settings_key(self) -> str:
         if not self._seq_dict:
@@ -469,7 +477,9 @@ class ReactorApp(tk.Tk):
             "shift": self._shift_var.get().strip(),
             "wait_time": self._wait_var.get().strip(),
             "fps": self._fps_var.get().strip(),
+            "leakrate_phase_reduction": self._leakrate_phase_reduction_var.get().strip(),
             "thickness_blank_rows": self._thickness_blank_rows_var.get().strip(),
+            "leakrate_phase_reduction": self._leakrate_phase_reduction_var.get().strip(),
         }
 
         names_payload = {
@@ -695,6 +705,10 @@ class ReactorApp(tk.Tk):
         ylim        = self._get_float(self._ylim_var)
         shift       = self._get_float(self._shift_var,  default=0.0)
         wait_time   = self._get_float(self._wait_var,   default=0.0)
+        leakrate_phase_reduction = max(
+            0.0,
+            self._get_float(self._leakrate_phase_reduction_var, default=0.0) or 0.0,
+        )
 
         self._persist_processing_preferences(valve_names)
 
@@ -704,11 +718,30 @@ class ReactorApp(tk.Tk):
 
         threading.Thread(
             target=self._run_processing,
-            args=(path, out_dir, valve_names, xlim, ylim, shift, wait_time),
+            args=(
+                path,
+                out_dir,
+                valve_names,
+                xlim,
+                ylim,
+                shift,
+                wait_time,
+                leakrate_phase_reduction,
+            ),
             daemon=True,
         ).start()
 
-    def _run_processing(self, path, out_dir, valve_names, xlim, ylim, shift, wait_time):
+    def _run_processing(
+        self,
+        path,
+        out_dir,
+        valve_names,
+        xlim,
+        ylim,
+        shift,
+        wait_time,
+        leakrate_phase_reduction,
+    ):
         """Worker function — runs in a background thread."""
         try:
             self._log(f"\n-- {Path(path).name}")
@@ -859,9 +892,14 @@ class ReactorApp(tk.Tk):
 
             # -- Exposure CSV -----------------------------------------------------
             self._log("Computing phase exposures...")
+            if leakrate_phase_reduction > 0:
+                self._log(
+                    f"  LeakRate phase reduction: {leakrate_phase_reduction:.3f} s on each side"
+                )
             exp_rows = compute_exposure_table(
                 cycles_sorted, cycle_points, cycle_start_map,
                 phased_seq, cyc_seq_map, assign_phase,
+                leakrate_phase_reduction=leakrate_phase_reduction,
             )
             csv_path = os.path.join(out_dir, f"{filename}_exposure.csv")
             self._run_save_with_retry(

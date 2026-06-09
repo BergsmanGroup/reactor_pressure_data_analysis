@@ -56,22 +56,22 @@ def build_segments(
         ``{phase_name: ([times], [pressures])}``
         Includes an ``"unassigned"`` entry for points outside all phase bins.
     """
-    pts_sorted  = sorted(cycle_points.get(cycle, []))
+    pts_sorted = sorted(cycle_points.get(cycle, []))
     if not pts_sorted:
         return {}
 
-    t0          = cycle_start_map.get(cycle, pts_sorted[0][0])
-    seq_key     = cyc_seq_map.get(cycle)
-    phase_bins  = phased_seq[seq_key].get("phase_bins",  []) if seq_key else []
+    t0 = cycle_start_map.get(cycle, pts_sorted[0][0])
+    seq_key = cyc_seq_map.get(cycle)
+    phase_bins = phased_seq[seq_key].get("phase_bins", []) if seq_key else []
     phase_names = phased_seq[seq_key].get("phase_names", []) if seq_key else []
 
-    segments: dict  = {}
-    prev_label      = None
-    seg_t: list     = []
-    seg_p: list     = []
+    segments: dict = {}
+    prev_label = None
+    seg_t: list = []
+    seg_p: list = []
 
     for t_s, pval in pts_sorted:
-        ct    = t_s - t0
+        ct = t_s - t0
         phase = assign_phase_fn(ct, phase_bins, phase_names)
         label = phase if phase else "unassigned"
 
@@ -116,9 +116,8 @@ def draw_cycle_figure(
     controls which backend canvas it is drawn on.
     """
     fig = plt.Figure(figsize=figsize)
-    ax  = fig.add_subplot(111)
+    ax = fig.add_subplot(111)
 
-    # Phases in canonical order so the legend is always consistent
     for pname in all_phase_names:
         if pname not in segments:
             continue
@@ -131,7 +130,7 @@ def draw_cycle_figure(
         ax.plot(ts, ps, linestyle="-", linewidth=0.8,
                 color="#cccccc", label="unassigned")
 
-    ax.set_xlabel("Time (s)",          fontsize=11)
+    ax.set_xlabel("Time (s)", fontsize=11)
     ax.set_ylabel("Pressure (mTorr)", fontsize=11)
     ax.set_title(f"{filename} cycle {cycle}", fontsize=12)
     ax.set_xlim(0, xlim)
@@ -174,14 +173,16 @@ def compute_axis_limits(
     Falls back to ``(600.0, 2500.0)`` if there is no data.
     """
     max_ct = 0.0
-    max_p  = 0.0
+    max_p = 0.0
 
     for cyc, pts in cycle_points.items():
         t0 = cycle_start_map.get(cyc, 0.0)
         for t_s, pval in pts:
             ct = t_s - t0
-            if ct  > max_ct: max_ct = ct
-            if pval > max_p:  max_p  = pval
+            if ct > max_ct:
+                max_ct = ct
+            if pval > max_p:
+                max_p = pval
 
     return (max_ct or 600.0), (max_p or 2500.0)
 
@@ -197,14 +198,16 @@ def compute_exposure_table(
     phased_seq:      dict,
     cyc_seq_map:     dict,
     assign_phase_fn,
+    leakrate_phase_reduction: float = 0.0,
 ) -> list:
     """
     For every cycle, compute trapezoidal exposure over only the ``dose`` and
     ``hold`` phases, combined into one integration per sequence/valve label.
 
     If a sequence contains a valve named ``LeakRate``, the row also includes
-    ``LeakRate_leak_rate`` computed from the full dose+hold pressure change
-    divided by the total exposure duration.
+    ``LeakRate_leak_rate`` computed as the least-squares slope dP/dt over all
+    dose+hold points for that cycle after trimming the first and last
+    ``leakrate_phase_reduction`` seconds from the exposure window.
 
     Returns a list of dicts, one row per sequence index (zero-based).
     Each row contains dynamic columns per valve label:
@@ -230,6 +233,20 @@ def compute_exposure_table(
                 "nominal_hold": hold,
                 "nominal_duration": dose + hold,
             }
+
+    phase_reduction = max(0.0, float(leakrate_phase_reduction or 0.0))
+
+    def _least_squares_slope(times, pressures):
+        n = len(times)
+        if n < 2:
+            return None
+        mean_t = sum(times) / n
+        mean_p = sum(pressures) / n
+        ss_tt = sum((t - mean_t) ** 2 for t in times)
+        if ss_tt <= 0:
+            return None
+        ss_tp = sum((times[i] - mean_t) * (pressures[i] - mean_p) for i in range(n))
+        return ss_tp / ss_tt
 
     rows = []
     for cycle in cycles_sorted:
@@ -287,23 +304,29 @@ def compute_exposure_table(
             row[f"{col}_nominal_duration"] = round(nominal["nominal_duration"], 6)
             row[f"{col}_exposure"] = round(total_exposure, 4)
             row[f"{col}_mean_pressure"] = round(mean_p, 4)
+
             if valve_label == "LeakRate":
-                exposure_times = []
-                exposure_pressures = []
+                exposure_points = []
                 for tail in ("dose", "hold"):
                     seg = segs.get(f"{phase_head}_{tail}")
                     if not seg:
                         continue
                     times_part, pressures_part = seg
-                    exposure_times.extend(times_part)
-                    exposure_pressures.extend(pressures_part)
-                if len(exposure_times) >= 2:
-                    total_exposure_time = exposure_times[-1] - exposure_times[0]
-                    if total_exposure_time > 0:
-                        leak_rate = (
-                            exposure_pressures[0] - exposure_pressures[-1]
-                        ) / total_exposure_time
-                        row[f"{col}_leak_rate"] = round(leak_rate, 4)
+                    exposure_points.extend(zip(times_part, pressures_part))
+
+                if len(exposure_points) >= 2:
+                    exposure_points.sort(key=lambda tp: tp[0])
+                    t_start = exposure_points[0][0] + phase_reduction
+                    t_end = exposure_points[-1][0] - phase_reduction
+                    trimmed = [tp for tp in exposure_points if t_start <= tp[0] <= t_end]
+
+                    if len(trimmed) >= 2:
+                        times = [t for t, _ in trimmed]
+                        pressures = [p for _, p in trimmed]
+                        leak_slope = _least_squares_slope(times, pressures)
+                        if leak_slope is not None:
+                            row[f"{col}_leak_rate"] = round(leak_slope, 6)
+
             has_nonzero_exposure = True
 
         if has_nonzero_exposure:
@@ -318,6 +341,7 @@ def save_exposure_csv(rows: list, out_dir: str, stem: str) -> str:
     Write *rows* to ``<out_dir>/<stem>_exposure.csv`` and return the path.
     """
     import csv
+
     out_path = os.path.join(out_dir, f"{stem}_exposure.csv")
 
     valve_prefixes = set()
@@ -391,9 +415,9 @@ def build_animation(
     from matplotlib.figure import Figure
     from matplotlib.backends.backend_agg import FigureCanvasAgg
 
-    frames   = []
+    frames = []
     n_frames = len(cycles_sorted)
-    last     = cycles_sorted[-1] if cycles_sorted else 1
+    last = cycles_sorted[-1] if cycles_sorted else 1
 
     for i, cycle in enumerate(cycles_sorted):
         segs = build_segments(
@@ -402,7 +426,7 @@ def build_animation(
         )
 
         fig = Figure(figsize=(12, 7))
-        FigureCanvasAgg(fig)                             # attach Agg renderer
+        FigureCanvasAgg(fig)
         fig.subplots_adjust(right=0.76, left=0.09, bottom=0.10, top=0.92)
         ax = fig.add_subplot(111)
 
@@ -418,8 +442,8 @@ def build_animation(
             ax.plot(ts, ps, linestyle="-", linewidth=0.8,
                     color="#cccccc", label="unassigned")
 
-        ax.set_xlabel("Time (s)",           fontsize=11)
-        ax.set_ylabel("Pressure (mTorr)",   fontsize=11)
+        ax.set_xlabel("Time (s)", fontsize=11)
+        ax.set_ylabel("Pressure (mTorr)", fontsize=11)
         ax.set_title(f"{filename}  —  Cycle {cycle} / {last}", fontsize=12)
         ax.set_xlim(0, xlim_val)
         ax.set_ylim(0, ylim_val)
