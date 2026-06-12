@@ -3,7 +3,7 @@
     "xlim": "auto",
     "ylim": "auto",
     "shift": "2",
-    "wait_time": "0",
+    "wait_time": "3600",
     "fps": "5",
     "leakrate_phase_reduction": "0",
     "thickness_blank_rows": "0"
@@ -42,6 +42,12 @@
       "6": "ED"
     },
     "13bf79ae8eac5fe5fd1e022dc7a1f670afe5372b": {
+      "5": "TDIC",
+      "6": "ED",
+      "7": "iSE",
+      "12": "LeakRate"
+    },
+    "1359b849dd543c9113c543c15fede110faeca534": {
       "5": "TDIC",
       "6": "ED",
       "7": "iSE",
