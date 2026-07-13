@@ -6,7 +6,7 @@ cd /d "%~dp0"
 
 if not exist ".venv\Scripts\python.exe" (
     echo Creating virtual environment in .venv...
-    py -m venv .venv
+    python -m venv .venv
     if errorlevel 1 (
         echo Failed to create virtual environment. Make sure Python is installed.
         exit /b 1
