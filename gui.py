@@ -17,6 +17,8 @@ import re
 import json
 import subprocess
 import hashlib
+import csv
+import tempfile
 from pathlib import Path
 
 import matplotlib
@@ -231,6 +233,8 @@ class ReactorApp(tk.Tk):
                    command=self._browse_recipe_sheet).pack(side="left", padx=(0, 4))
         ttk.Button(file_frame, text="Create JSON Payload",
                    command=self._create_recipe_payload).pack(side="left", padx=(0, 4))
+        ttk.Button(file_frame, text="Open Blank Sheet",
+               command=self._open_blank_recipe_sheet).pack(side="left", padx=(0, 4))
         ttk.Button(file_frame, text="Open File Location",
                    command=self._open_recipe_file_location).pack(side="left")
 
@@ -611,6 +615,59 @@ class ReactorApp(tk.Tk):
     def _open_recipe_file_location(self):
         target = self._recipe_output_path.get() or self._recipe_sheet_path.get()
         self._open_path_in_explorer(target, "recipe sheet")
+
+    def _create_blank_recipe_sheet(self) -> Path:
+        tmp_file = tempfile.NamedTemporaryFile(
+            prefix="reactor_blank_recipe_sheet_",
+            suffix=".csv",
+            delete=False,
+        )
+        tmp_file.close()
+
+        template_rows = [
+            ("User/File Name Info", ""),
+            ("Info", ""),
+            ("Wait time", ""),
+            ("EDR", ""),
+            ("DID", ""),
+            ("SID", ""),
+            ("EID", ""),
+            ("PID", ""),
+            ("Valve/precursor", ""),
+            ("Name", ""),
+            ("Temperature (C) ", ""),
+            (),
+            ("Cycles", "Valve", "PrePurge", "N2Dose", "PumpDose", "Dose", "Hold", "PrePurge", "Purge"),
+        ]
+
+        with open(tmp_file.name, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.writer(fh)
+            writer.writerows(template_rows)
+
+        return Path(tmp_file.name)
+
+    def _open_blank_recipe_sheet(self):
+        try:
+            template_path = self._create_blank_recipe_sheet()
+        except Exception as exc:
+            messagebox.showerror(
+                "Open Blank Sheet",
+                f"Could not create the blank recipe sheet:\n\n{exc}",
+                parent=self,
+            )
+            return
+
+        try:
+            if hasattr(os, "startfile"):
+                os.startfile(str(template_path))
+            else:
+                subprocess.Popen(["explorer", str(template_path)])
+        except Exception as exc:
+            messagebox.showerror(
+                "Open Blank Sheet",
+                f"Could not open the blank recipe sheet:\n\n{exc}",
+                parent=self,
+            )
 
     def _load_recipe_sheet_preview(self):
         path = self._recipe_sheet_path.get().strip()
