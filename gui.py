@@ -12,12 +12,13 @@ Imports the three pure-logic modules and wires them to the UI:
 import tkinter as tk
 from tkinter import ttk, filedialog, scrolledtext, messagebox
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import os
 import re
 import json
 import subprocess
 import hashlib
-import csv
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -48,7 +49,7 @@ from plot_utils  import (
     build_animation,
 )
 from ise_utils import save_ise_thickness_csv
-from convert_to_json import load_table, build_payload, convert_recipe_sheet
+from convert_to_json import load_table, build_payload, save_payload
 from header_editor import open_header_editor
 
 
@@ -77,6 +78,7 @@ class ReactorApp(tk.Tk):
         self._leakrate_phase_reduction_var = tk.StringVar(value="0")
         self._thickness_blank_rows_var = tk.StringVar(value="0")
         self._preview_cycle_var = tk.StringVar(value="1")
+        self._write_condensed_json_var = tk.BooleanVar(value=True)
         self._ise_file_path     = tk.StringVar()
         self._recipe_sheet_path = tk.StringVar()
         self._recipe_output_path = tk.StringVar()
@@ -86,6 +88,8 @@ class ReactorApp(tk.Tk):
         self._header_info:     dict = {}
         self._seq_dict:        dict = {}
         self._valve_name_vars: dict = {}   # {valve_num_int: tk.StringVar}
+        self._valve_name_entries: dict = {} # {valve_num_int: ttk.Entry}
+        self._wait_entry = None
         self._cached:          dict = {}   # populated after a processing run
         self._recipe_payload:  dict = {}
         self._settings_path = Path(__file__).with_name("gui_processing_state.json")
@@ -175,8 +179,16 @@ class ReactorApp(tk.Tk):
         for label_text, row, col, var in _opts:
             ttk.Label(plot_frame, text=label_text).grid(
                 row=row, column=col, sticky="w", padx=3, pady=(3, 0))
-            ttk.Entry(plot_frame, textvariable=var, width=8).grid(
+            entry = ttk.Entry(plot_frame, textvariable=var, width=8)
+            entry.grid(
                 row=row, column=col + 1, padx=3, pady=(3, 0))
+            if label_text == "Wait time (s):":
+                self._wait_entry = entry
+        ttk.Checkbutton(
+            plot_frame,
+            text="Write condensed data JSON",
+            variable=self._write_condensed_json_var,
+        ).grid(row=6, column=0, columnspan=3, sticky="w", padx=3, pady=(6, 0))
 
         # -- Process button + progress bar -------------------------------------
         ctrl = ttk.Frame(parent)
@@ -292,6 +304,15 @@ class ReactorApp(tk.Tk):
 
     def _prompt_retry_save(self, file_path: str, label: str) -> bool:
         """Show a GUI retry/cancel prompt for a locked output file."""
+        if threading.current_thread() is threading.main_thread():
+            return messagebox.askretrycancel(
+                "File In Use",
+                f"Could not save the {label} because it appears to be open:\n\n"
+                f"{file_path}\n\n"
+                "Close the file, then click Retry to try saving again.",
+                parent=self,
+            )
+
         result = {"retry": False}
         done = threading.Event()
 
@@ -417,6 +438,157 @@ class ReactorApp(tk.Tk):
 
         return str(details_value)
 
+    def _parse_experimental_details_payload(self, details_value):
+        if isinstance(details_value, dict):
+            return dict(details_value)
+        if isinstance(details_value, str):
+            text = details_value.strip()
+            if not text:
+                return {}
+            try:
+                parsed = json.loads(text)
+            except (TypeError, ValueError):
+                return text
+            if isinstance(parsed, dict):
+                return parsed
+        return details_value if details_value is not None else {}
+
+    def _recipe_valve_name_payload(self, valve_names: dict) -> dict:
+        used_valves: set[int] = set()
+        for seq_data in self._seq_dict.values():
+            for key in seq_data:
+                if key.startswith("valve"):
+                    match = re.search(r"\d+", key)
+                    if match:
+                        used_valves.add(int(match.group()))
+
+        payload = {}
+        for vnum in sorted(used_valves):
+            name = str(valve_names.get(vnum, "")).strip()
+            if name:
+                payload[str(vnum)] = name
+        return payload
+
+    def _details_valve_name_mapping(self, details_payload) -> dict[int, str]:
+        if not isinstance(details_payload, dict):
+            return {}
+
+        names = details_payload.get("Name", [])
+        precursors = details_payload.get("ValvePrecursor", [])
+        if not isinstance(names, list) or not isinstance(precursors, list):
+            return {}
+
+        mapping: dict[int, str] = {}
+        for precursor, name in zip(precursors, names):
+            try:
+                vnum = int(precursor)
+            except (TypeError, ValueError):
+                continue
+
+            label = str(name).strip()
+            if label and label.lower() != "stage":
+                mapping[vnum] = label
+
+        return mapping
+
+    def _effective_valve_names(self, manual_valve_names: dict, details_payload) -> dict[int, str]:
+        effective = {
+            vnum: str(name).strip()
+            for vnum, name in manual_valve_names.items()
+            if str(name).strip()
+        }
+        effective.update(self._details_valve_name_mapping(details_payload))
+        return effective
+
+    def _apply_detail_valve_names(self, details_payload):
+        details_payload = self._parse_experimental_details_payload(details_payload)
+        details_mapping = self._details_valve_name_mapping(details_payload)
+        if not details_mapping:
+            for entry in self._valve_name_entries.values():
+                entry.configure(state="normal")
+            return
+
+        for vnum, var in self._valve_name_vars.items():
+            name = details_mapping.get(vnum)
+            if name:
+                var.set(name)
+                entry = self._valve_name_entries.get(vnum)
+                if entry is not None:
+                    entry.configure(state="disabled")
+            else:
+                entry = self._valve_name_entries.get(vnum)
+                if entry is not None:
+                    entry.configure(state="normal")
+
+    def _apply_detail_wait_time(self, details_payload):
+        details_payload = self._parse_experimental_details_payload(details_payload)
+        if not isinstance(details_payload, dict):
+            if self._wait_entry is not None:
+                self._wait_entry.configure(state="normal")
+            return
+
+        if "WaitTime" not in details_payload:
+            if self._wait_entry is not None:
+                self._wait_entry.configure(state="normal")
+            return
+
+        wait_time = details_payload.get("WaitTime", "")
+        self._wait_var.set(str(wait_time))
+        if self._wait_entry is not None:
+            self._wait_entry.configure(state="disabled")
+
+    def _sequence_notes_by_seq(self, details_payload) -> tuple[dict[int, str], dict[int, str]]:
+        notes_by_seq: dict[int, str] = {}
+        notes_by_cycles: dict[int, str] = {}
+        if not isinstance(details_payload, dict):
+            return notes_by_seq, notes_by_cycles
+
+        entries = details_payload.get("SequenceNotes", [])
+        if not isinstance(entries, list):
+            return notes_by_seq, notes_by_cycles
+
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            note_text = str(entry.get("Note", "")).strip()
+            if not note_text:
+                continue
+
+            seq_value = entry.get("Seq", entry.get("Sequence"))
+            if seq_value not in (None, ""):
+                try:
+                    notes_by_seq[int(seq_value)] = note_text
+                except (TypeError, ValueError):
+                    pass
+
+            cycle_value = entry.get("Cycles")
+            if cycle_value not in (None, ""):
+                try:
+                    notes_by_cycles[int(cycle_value)] = note_text
+                except (TypeError, ValueError):
+                    pass
+
+        return notes_by_seq, notes_by_cycles
+
+    def _sequence_note_text(self, seq_key: str, phased_seq: dict, details_payload) -> str | None:
+        notes_by_seq, notes_by_cycles = self._sequence_notes_by_seq(details_payload)
+        match = re.search(r"\d+", seq_key or "")
+        seq_index = int(match.group()) if match else None
+        if seq_index is None:
+            return None
+
+        note_text = notes_by_seq.get(seq_index)
+        if not note_text:
+            cycles = phased_seq.get(seq_key, {}).get("cycles") if isinstance(phased_seq, dict) else None
+            if cycles not in (None, ""):
+                try:
+                    note_text = notes_by_cycles.get(int(cycles))
+                except (TypeError, ValueError):
+                    note_text = None
+        if not note_text:
+            return None
+        return f"Seq {seq_index}: {note_text}"
+
     def _format_timing_table(self, seq_dict: dict) -> str:
         lines = ["Timing table:"]
         for seq_key, seq_data in seq_dict.items():
@@ -487,6 +659,7 @@ class ReactorApp(tk.Tk):
         fps = last.get("fps")
         leakrate_phase_reduction = last.get("leakrate_phase_reduction")
         thickness_blank_rows = last.get("thickness_blank_rows")
+        write_condensed_json = last.get("write_condensed_json")
         leakrate_phase_reduction = last.get("leakrate_phase_reduction")
         if xlim is not None:
             self._xlim_var.set(str(xlim))
@@ -502,6 +675,8 @@ class ReactorApp(tk.Tk):
             self._leakrate_phase_reduction_var.set(str(leakrate_phase_reduction))
         if thickness_blank_rows is not None:
             self._thickness_blank_rows_var.set(str(thickness_blank_rows))
+        if write_condensed_json is not None:
+            self._write_condensed_json_var.set(bool(write_condensed_json))
         if leakrate_phase_reduction is not None:
             self._leakrate_phase_reduction_var.set(str(leakrate_phase_reduction))
 
@@ -545,6 +720,7 @@ class ReactorApp(tk.Tk):
             "fps": self._fps_var.get().strip(),
             "leakrate_phase_reduction": self._leakrate_phase_reduction_var.get().strip(),
             "thickness_blank_rows": self._thickness_blank_rows_var.get().strip(),
+            "write_condensed_json": self._write_condensed_json_var.get(),
             "leakrate_phase_reduction": self._leakrate_phase_reduction_var.get().strip(),
         }
 
@@ -582,6 +758,7 @@ class ReactorApp(tk.Tk):
         if path:
             self._file_path.set(path)
             self._output_dir.set(self._default_output_dir_for_file(path))
+            self._load_header()
 
     def _browse_output(self):
         path = filedialog.askdirectory(title="Select Output Directory")
@@ -599,7 +776,7 @@ class ReactorApp(tk.Tk):
     def _browse_recipe_sheet(self):
         path = filedialog.askopenfilename(
             title="Select Recipe Sheet",
-            filetypes=[("CSV files", "*.csv"), ("Excel files", "*.xlsx;*.xls"), ("All files", "*.*")],
+            filetypes=[("Excel files", "*.xlsx;*.xls"), ("CSV files", "*.csv"), ("All files", "*.*")],
         )
         if path:
             self._recipe_sheet_path.set(path)
@@ -617,32 +794,18 @@ class ReactorApp(tk.Tk):
         self._open_path_in_explorer(target, "recipe sheet")
 
     def _create_blank_recipe_sheet(self) -> Path:
+        template_path = Path(__file__).with_name("Recipe sheet workbook format.xlsx")
+        if not template_path.is_file():
+            raise FileNotFoundError(f"Template workbook not found: {template_path.name}")
+
         tmp_file = tempfile.NamedTemporaryFile(
             prefix="reactor_blank_recipe_sheet_",
-            suffix=".csv",
+            suffix=".xlsx",
             delete=False,
         )
         tmp_file.close()
 
-        template_rows = [
-            ("User/File Name Info", ""),
-            ("Info", ""),
-            ("Wait time", ""),
-            ("EDR", ""),
-            ("DID", ""),
-            ("SID", ""),
-            ("EID", ""),
-            ("PID", ""),
-            ("Valve/precursor", ""),
-            ("Name", ""),
-            ("Temperature (C) ", ""),
-            (),
-            ("Cycles", "Valve", "PrePurge", "N2Dose", "PumpDose", "Dose", "Hold", "PrePurge", "Purge"),
-        ]
-
-        with open(tmp_file.name, "w", newline="", encoding="utf-8") as fh:
-            writer = csv.writer(fh)
-            writer.writerows(template_rows)
+        shutil.copyfile(template_path, tmp_file.name)
 
         return Path(tmp_file.name)
 
@@ -682,6 +845,14 @@ class ReactorApp(tk.Tk):
 
         try:
             payload = build_payload(load_table(Path(path)))
+        except PermissionError:
+            self._recipe_payload = {}
+            self._recipe_status_var.set("ERROR: The selected recipe sheet is open in another program.")
+            self._set_text_widget(
+                self._recipe_preview_box,
+                "Failed to load recipe sheet.\n\nThe file is open in another program. Close it and try again.",
+            )
+            return
         except Exception as exc:
             self._recipe_payload = {}
             self._recipe_status_var.set(f"ERROR: {exc}")
@@ -708,6 +879,23 @@ class ReactorApp(tk.Tk):
             if not self._recipe_payload:
                 return
 
+        try:
+            payload = build_payload(load_table(Path(path)))
+        except PermissionError:
+            self._recipe_payload = {}
+            self._recipe_status_var.set("ERROR: The selected recipe sheet is open in another program.")
+            messagebox.showerror(
+                "Create JSON Payload",
+                "Failed to load recipe sheet.\n\nThe file is open in another program. Close it and try again.",
+                parent=self,
+            )
+            return
+        except Exception as exc:
+            self._recipe_payload = {}
+            self._recipe_status_var.set(f"ERROR: {exc}")
+            messagebox.showerror("Create JSON Payload", f"Failed to load recipe sheet.\n\n{exc}", parent=self)
+            return
+
         out_path = self._recipe_output_path.get().strip()
         if not out_path:
             out_path = str(Path(path).with_name(f"{Path(path).stem}_payload.json"))
@@ -715,7 +903,7 @@ class ReactorApp(tk.Tk):
 
         try:
             payload, saved_path = self._run_save_with_retry(
-                lambda: convert_recipe_sheet(path, out_path=out_path),
+                lambda: (payload, save_payload(payload, out_path)),
                 out_path,
                 "recipe JSON",
             )
@@ -744,6 +932,7 @@ class ReactorApp(tk.Tk):
         if not path or not os.path.isfile(path):
             self._log("ERROR: Select a valid file first.")
             return
+        self._clear_log()
         try:
             self._header_info = read_header(path)
         except Exception as e:
@@ -753,18 +942,21 @@ class ReactorApp(tk.Tk):
         vs = self._header_info.get("valveSequence", [])
         self._seq_dict = convert_sequence(vs)
 
-        self._log(f"Loaded:  {self._header_info.get('username', '')}")
-        details_text = self._format_header_details(self._header_info.get("experimentalDetails", ""))
-        if details_text:
-            self._log(f"Details:\n{details_text}")
+        self._log(f"Loading:  {path}")
         self._log(self._format_timing_table(self._seq_dict))
         for sk, sd in self._seq_dict.items():
             valves = [k for k in sd if k.startswith("valve")]
             self._log(f"  {sk}: {sd['cycles']} cycles -- {', '.join(valves)}")
+        details_text = self._format_header_details(self._header_info.get("experimentalDetails", ""))
+        if details_text:
+            self._log(f"Details:\n{details_text}")
+        self._log(f"Loaded:  {self._header_info.get('username', '')}")
 
         self._populate_valve_fields()
-        self._apply_saved_valve_names()
         self._apply_last_processing_settings()
+        self._apply_saved_valve_names()
+        self._apply_detail_valve_names(self._header_info.get("experimentalDetails", ""))
+        self._apply_detail_wait_time(self._header_info.get("experimentalDetails", ""))
         self._process_btn.config(state="normal")
         self._edit_header_btn.config(state="normal")
 
@@ -841,13 +1033,16 @@ class ReactorApp(tk.Tk):
             fill="x", padx=4, pady=(2, 4))
 
         self._valve_name_vars.clear()
+        self._valve_name_entries.clear()
         for vnum in sorted(rows):
             rf = ttk.Frame(self._valve_frame)
             rf.pack(fill="x", pady=1, padx=4)
             ttk.Label(rf, text=f"Valve {vnum}", width=10, anchor="w").grid(row=0, column=0, padx=4)
             var = tk.StringVar(value=str(vnum))
-            ttk.Entry(rf, textvariable=var, width=28).grid(row=0, column=1, padx=4)
+            entry = ttk.Entry(rf, textvariable=var, width=28)
+            entry.grid(row=0, column=1, padx=4)
             self._valve_name_vars[vnum] = var
+            self._valve_name_entries[vnum] = entry
 
     # =========================================================================
     #  Processing
@@ -872,6 +1067,7 @@ class ReactorApp(tk.Tk):
             0.0,
             self._get_float(self._leakrate_phase_reduction_var, default=0.0) or 0.0,
         )
+        write_condensed_json = self._write_condensed_json_var.get()
 
         self._persist_processing_preferences(valve_names)
 
@@ -890,6 +1086,7 @@ class ReactorApp(tk.Tk):
                 shift,
                 wait_time,
                 leakrate_phase_reduction,
+                write_condensed_json,
             ),
             daemon=True,
         ).start()
@@ -904,6 +1101,7 @@ class ReactorApp(tk.Tk):
         shift,
         wait_time,
         leakrate_phase_reduction,
+        write_condensed_json,
     ):
         """Worker function — runs in a background thread."""
         try:
@@ -916,6 +1114,18 @@ class ReactorApp(tk.Tk):
             named_seq   = apply_valve_names(self._seq_dict, valve_names)
             phased_seq  = compute_phase_bins(named_seq, shift=shift)
             cyc_seq_map = make_cycle_seq_map(phased_seq)
+            details_payload = self._parse_experimental_details_payload(
+                self._header_info.get("experimentalDetails", "")
+            )
+            if isinstance(details_payload, dict):
+                valve_names = self._effective_valve_names(valve_names, details_payload)
+                named_seq = apply_valve_names(self._seq_dict, valve_names)
+                phased_seq = compute_phase_bins(named_seq, shift=shift)
+                cyc_seq_map = make_cycle_seq_map(phased_seq)
+                valve_name_payload = self._recipe_valve_name_payload(valve_names)
+                if valve_name_payload:
+                    details_payload = dict(details_payload)
+                    details_payload["ValveNames"] = valve_name_payload
 
             for sk, sd in phased_seq.items():
                 self._log(f"  {sk} bins (s): {sd.get('phase_bins', [])}")
@@ -934,71 +1144,62 @@ class ReactorApp(tk.Tk):
             self._log(f"  {len(cycle_points)} cycles, "
                       f"{sum(len(v) for v in cycle_points.values()):,} pressure points")
 
-            # -- Write condensed log (always refresh, even for condensed input) ---
-            is_input_condensed = is_condensed_file(path)
-            cpath = Path(path) if is_input_condensed else condensed_path(path)
-            self._log("Writing condensed log...")
-            try:
-                condensed_out = str(cpath)
+            condensed_future = None
+            if write_condensed_json:
+                # -- Write condensed log -----------------------------------------
+                is_input_condensed = is_condensed_file(path)
+                cpath = Path(path) if is_input_condensed else condensed_path(path)
+                self._log("Writing condensed log...")
+                condensed_executor = ThreadPoolExecutor(max_workers=1)
+                try:
+                    condensed_out = str(cpath)
 
-                def _fmt_bytes(nbytes: int) -> str:
-                    units = ["B", "KB", "MB", "GB", "TB"]
-                    size = float(max(nbytes, 0))
-                    idx = 0
-                    while size >= 1024.0 and idx < len(units) - 1:
-                        size /= 1024.0
-                        idx += 1
-                    return f"{size:.2f} {units[idx]}"
+                    def _fmt_bytes(nbytes: int) -> str:
+                        units = ["B", "KB", "MB", "GB", "TB"]
+                        size = float(max(nbytes, 0))
+                        idx = 0
+                        while size >= 1024.0 and idx < len(units) - 1:
+                            size /= 1024.0
+                            idx += 1
+                        return f"{size:.2f} {units[idx]}"
 
-                def _format_phase_for_step(phase_name: str) -> str:
-                    parts = phase_name.split("_")
-                    if parts:
-                        parts[-1] = parts[-1].capitalize()
-                    return "_".join(parts)
+                    def _format_phase_for_step(phase_name: str) -> str:
+                        parts = phase_name.split("_")
+                        if parts:
+                            parts[-1] = parts[-1].capitalize()
+                        return "_".join(parts)
 
-                def _phase_lookup(cycle, time_s, raw_step, payload):
-                    seq_key = cyc_seq_map.get(cycle)
-                    if not seq_key:
-                        return None
-                    bins = phased_seq.get(seq_key, {}).get("phase_bins", [])
-                    names = phased_seq.get(seq_key, {}).get("phase_names", [])
-                    if not bins or not names:
-                        return None
-                    t0 = cycle_start_map.get(cycle)
-                    if t0 is None:
-                        return None
-                    phase = assign_phase(time_s - t0, bins, names)
-                    if not phase:
-                        return None
-                    return _format_phase_for_step(phase)
+                    def _phase_lookup(cycle, time_s, raw_step, payload):
+                        seq_key = cyc_seq_map.get(cycle)
+                        if not seq_key:
+                            return None
+                        bins = phased_seq.get(seq_key, {}).get("phase_bins", [])
+                        names = phased_seq.get(seq_key, {}).get("phase_names", [])
+                        if not bins or not names:
+                            return None
+                        t0 = cycle_start_map.get(cycle)
+                        if t0 is None:
+                            return None
+                        phase = assign_phase(time_s - t0, bins, names)
+                        if not phase:
+                            return None
+                        return _format_phase_for_step(phase)
 
-                stats = self._run_save_with_retry(
-                    lambda: condense_log(
-                        path,
-                        condensed_out,
-                        phase_lookup=_phase_lookup,
-                        return_stats=True,
-                    ),
-                    condensed_out,
-                    "condensed log",
-                )
-                self._log(
-                    f"  Raw rows before condense: {stats['total_rows']:,} total, "
-                    f"{stats['pressure_rows']:,} pressure"
-                )
-                self._log(
-                    f"  File size: {_fmt_bytes(stats['input_size_bytes'])} -> "
-                    f"{_fmt_bytes(stats['output_size_bytes'])} "
-                    f"({stats['size_reduction_pct']:.1f}% reduction)"
-                )
-                self._log(
-                    f"  Condensed: {Path(cpath).name}  "
-                    f"({stats['rows_written']:,} data rows)"
-                )
-            except SaveAbortedError:
-                self._log("  Condensed log save cancelled.")
-            except Exception as exc:
-                self._log(f"  WARNING: could not write condensed log: {exc}")
+                    condensed_future = condensed_executor.submit(
+                        lambda: self._run_save_with_retry(
+                            lambda: condense_log(
+                                path,
+                                condensed_out,
+                                phase_lookup=_phase_lookup,
+                                return_stats=True,
+                            ),
+                            condensed_out,
+                            "condensed log",
+                        )
+                    )
+                except Exception:
+                    condensed_executor.shutdown(wait=False, cancel_futures=True)
+                    raise
 
             # -- Baseline correction ----------------------------------------------
             cycle_points, baseline = subtract_baseline(cycle_points)
@@ -1036,7 +1237,9 @@ class ReactorApp(tk.Tk):
 
                 fig = draw_cycle_figure(
                     cycle, filename, segs, phase_color_map,
-                    all_phase_names, xlim_val, ylim_val)
+                    all_phase_names, xlim_val, ylim_val,
+                    sequence_note=self._sequence_note_text(seq_key, phased_seq, details_payload),
+                )
 
                 png_path = os.path.join(out_dir, f"cycle_{cycle:04d}.png")
                 try:
@@ -1052,6 +1255,27 @@ class ReactorApp(tk.Tk):
 
             self._set_progress(100)
             self._log(f"\nDone -- {total} plots saved to:\n  {out_dir}")
+
+            try:
+                stats = condensed_future.result() if condensed_future is not None else None
+                if stats is not None:
+                    self._log(
+                        f"  Raw rows before condense: {stats['total_rows']:,} total, "
+                        f"{stats['pressure_rows']:,} pressure"
+                    )
+                    self._log(
+                        f"  File size: {_fmt_bytes(stats['input_size_bytes'])} -> "
+                        f"{_fmt_bytes(stats['output_size_bytes'])} "
+                        f"({stats['size_reduction_pct']:.1f}% reduction)"
+                    )
+                    self._log(
+                        f"  Condensed: {Path(cpath).name}  "
+                        f"({stats['rows_written']:,} data rows)"
+                    )
+            except SaveAbortedError:
+                self._log("  Condensed log save cancelled.")
+            except Exception as exc:
+                self._log(f"  WARNING: could not write condensed log: {exc}")
 
             # -- Exposure CSV -----------------------------------------------------
             self._log("Computing phase exposures...")
@@ -1114,12 +1338,18 @@ class ReactorApp(tk.Tk):
                 ylim_val        = ylim_val,
                 filename        = filename,
                 out_dir         = out_dir,
+                experimental_details = details_payload,
             )
         except SaveAbortedError as exc:
             self._log(f"Save cancelled: {exc}")
         except Exception as exc:
             self._log(f"Processing ERROR: {exc}")
         finally:
+            try:
+                if 'condensed_executor' in locals():
+                    condensed_executor.shutdown(wait=True, cancel_futures=False)
+            except Exception:
+                pass
             def _re_enable():
                 self._process_btn.config(state="normal")
                 self._preview_btn.config(state="normal")
@@ -1176,6 +1406,7 @@ class ReactorApp(tk.Tk):
                     c["ylim_val"],
                     c["filename"],
                     out_dir,
+                    sequence_note_fn=lambda cycle, seq_key: self._sequence_note_text(seq_key or "", c["phased_seq"], c.get("experimental_details", {})),
                     fps=max(1, int(fps)),
                     progress_cb=_prog,
                 ),
@@ -1229,6 +1460,8 @@ class ReactorApp(tk.Tk):
             assign_phase,
         )
 
+        details_payload = c.get("experimental_details", {})
+
         fig = draw_cycle_figure(
             cycle,
             c["filename"],
@@ -1237,6 +1470,7 @@ class ReactorApp(tk.Tk):
             c["all_phase_names"],
             c["xlim_val"],
             c["ylim_val"],
+            sequence_note=self._sequence_note_text(c["cyc_seq_map"].get(cycle, ""), c["phased_seq"], details_payload),
             figsize=(10, 7),
         )
 

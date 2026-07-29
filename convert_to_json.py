@@ -4,6 +4,10 @@ from pathlib import Path
 import pandas as pd
 
 
+RECIPE_COLS = 10
+RECIPE_SEQUENCE_COLS = 9
+
+
 HEADER_KEY_MAP = {
     "Info": "Info",
     "Wait time": "WaitTime",
@@ -86,6 +90,8 @@ def extract_header_details(df: pd.DataFrame) -> tuple[str, dict]:
     details: dict = {}
     username_base = ""
 
+    df = df.iloc[:, :RECIPE_COLS].copy()
+
     norm_col0 = df.iloc[:, 0].fillna("").astype(str).map(_clean_cell)
     cycles_rows = norm_col0[norm_col0 == "Cycles"].index
     stop_idx = int(cycles_rows[0]) if len(cycles_rows) else df.shape[0]
@@ -154,7 +160,8 @@ def extract_timing_table(
     rows: int | None = None,
     cols: int | None = None,
 ) -> list[list[str]]:
-    timing_df = df.fillna("").astype(str).iloc[:, :9].copy()
+    timing_df = df.iloc[:, :RECIPE_COLS].fillna("").astype(str).copy()
+    timing_df = timing_df.reindex(columns=range(RECIPE_COLS), fill_value="")
     header_rows = timing_df.index[timing_df.iloc[:, 0].map(_clean_cell) == "Cycles"]
     if len(header_rows) == 0:
         raise ValueError("Could not find the timing table header row starting with 'Cycles'.")
@@ -170,7 +177,7 @@ def extract_timing_table(
         max_rows = rows if rows is not None else timing_df.shape[0]
         max_cols = cols if cols is not None else timing_df.shape[1]
         timing_df = timing_df.iloc[:max_rows, :max_cols].copy()
-        timing_df = timing_df.reindex(index=range(max_rows), columns=range(max_cols), fill_value="")
+        timing_df = timing_df.reset_index(drop=True)
 
     return timing_df.values.tolist()
 
@@ -214,20 +221,44 @@ def _estimate_process_times(df: pd.DataFrame, details: dict) -> dict:
 
     _commit_sequence()
 
+    wait_seconds = _to_float(details.get("WaitTime", 0)) if isinstance(details, dict) else 0.0
     process_hours = round(total_seconds / 3600.0, 6)
-    out = {"ProcessTimeHr": process_hours}
+    total_duration_seconds = wait_seconds + total_seconds
+    end_dt = pd.Timestamp.now() + pd.to_timedelta(total_duration_seconds, unit="s")
 
-    start_raw = details.get("StartTime", "") if isinstance(details, dict) else ""
-    if isinstance(start_raw, list):
-        start_raw = next((x for x in start_raw if _clean_cell(x)), "")
-    start_text = _clean_cell(start_raw)
-    if start_text:
-        start_dt = pd.to_datetime(start_text, errors="coerce")
-        if pd.notna(start_dt):
-            end_dt = start_dt + pd.to_timedelta(total_seconds, unit="s")
-            out["EndTime"] = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+    out = {
+        "ProcessTimeHr": process_hours,
+        "EndTime": end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+    }
 
     return out
+
+
+def _extract_sequence_notes(df: pd.DataFrame) -> list[dict]:
+    notes: list[dict] = []
+    timing_rows = extract_timing_table(df)
+
+    current_cycles = ""
+    seq_index = 0
+    for row in timing_rows:
+        if not row:
+            continue
+
+        cycle_cell = _clean_cell(row[0]) if len(row) > 0 else ""
+        if cycle_cell:
+            seq_index += 1
+            current_cycles = cycle_cell
+            note_text = _clean_cell(row[9]) if len(row) > 9 else ""
+            if note_text:
+                notes.append(
+                    {
+                        "Seq": seq_index,
+                        "Cycles": _coerce_token(current_cycles),
+                        "Note": note_text,
+                    }
+                )
+
+    return notes
 
 
 def build_payload(
@@ -247,6 +278,9 @@ def build_payload(
 
     if isinstance(payload_details, dict):
         payload_details.update(_estimate_process_times(df, payload_details))
+        sequence_notes = _extract_sequence_notes(df)
+        if sequence_notes:
+            payload_details["SequenceNotes"] = sequence_notes
 
     payload_username = username if username is not None else build_username(base_username, payload_details)
     if isinstance(payload_details, str):
@@ -256,10 +290,25 @@ def build_payload(
         details_text = json.dumps(payload_details, ensure_ascii=False, separators=(",", ":"))
 
     return {
-        "recipe": extract_timing_table(df, rows=rows, cols=cols),
+        "recipe": extract_timing_table(
+            df,
+            rows=rows,
+            cols=min(cols, RECIPE_SEQUENCE_COLS) if cols is not None else RECIPE_SEQUENCE_COLS,
+        ),
         "username": payload_username,
         "experimentalDetails": details_text,
     }
+
+
+def extract_sequence_notes(df: pd.DataFrame) -> list[dict]:
+    return _extract_sequence_notes(df)
+
+
+def save_payload(payload: dict, out_path: str | Path) -> Path:
+    output_path = Path(out_path)
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    return output_path
 
 
 def convert_recipe_sheet(
@@ -275,9 +324,7 @@ def convert_recipe_sheet(
     payload = build_payload(df, username=username, details=details, rows=rows, cols=cols)
 
     output_path = Path(out_path) if out_path else path.with_name(f"{path.stem}_payload.json")
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
-
+    save_payload(payload, output_path)
     return payload, output_path
 
 

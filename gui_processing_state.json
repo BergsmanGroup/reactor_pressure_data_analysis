@@ -3,10 +3,11 @@
     "xlim": "auto",
     "ylim": "auto",
     "shift": "2",
-    "wait_time": "3600",
+    "wait_time": "0",
     "fps": "5",
     "leakrate_phase_reduction": "0",
-    "thickness_blank_rows": "0"
+    "thickness_blank_rows": "0",
+    "write_condensed_json": false
   },
   "valve_names_by_header": {
     "f39b8e411b9e3156b74209f37fa4a22950d4e2bc": {
@@ -52,6 +53,35 @@
       "6": "ED",
       "7": "iSE",
       "12": "LeakRate"
+    },
+    "44d6feae8c45ffc27ccc900592c9b2fd6f349445": {
+      "6": "ED",
+      "9": "9"
+    },
+    "0d9c28f691d309e1143250796a4f9a0c8c5fc885": {
+      "5": "5",
+      "7": "7",
+      "9": "9"
+    },
+    "713bfc518a974070370dcd70b237aaa57bd90d02": {
+      "5": "TDIC",
+      "7": "GV",
+      "8": "DAMDPA"
+    },
+    "6e9e9c0964a5982cbaf79bb4a3b11019d5d79253": {
+      "5": "TDIC",
+      "7": "GV",
+      "8": "DAMDPA"
+    },
+    "80ece74425f3179a4c7a321897d6c87f459a0b40": {
+      "5": "TDIC",
+      "7": "GV",
+      "8": "DAMDPA"
+    },
+    "b096cc11c2242463927c1cd7183ae16240aa8192": {
+      "5": "TDIC",
+      "7": "GV",
+      "8": "DAMDPA"
     }
   },
   "valve_names_by_set": {
@@ -68,12 +98,25 @@
     },
     "6": {
       "6": "ED"
+    },
+    "6|9": {
+      "6": "ED",
+      "9": "9"
+    },
+    "5|7|9": {
+      "5": "5",
+      "7": "7",
+      "9": "9"
+    },
+    "5|7|8": {
+      "5": "TDIC",
+      "7": "GV",
+      "8": "DAMDPA"
     }
   },
   "last_valve_names": {
     "5": "TDIC",
-    "6": "ED",
-    "7": "iSE",
-    "12": "LeakRate"
+    "7": "GV",
+    "8": "DAMDPA"
   }
 }

@@ -25,6 +25,7 @@ compute_axis_limits(cycle_points, cycle_start_map) -> (max_cycle_time, max_press
 """
 
 import os
+import textwrap
 import matplotlib.pyplot as plt
 
 
@@ -107,6 +108,7 @@ def draw_cycle_figure(
     all_phase_names: list,
     xlim:            float,
     ylim:            float,
+    sequence_note:   str | None = None,
     figsize:         tuple = (10, 8),
 ) -> plt.Figure:
     """
@@ -142,6 +144,24 @@ def draw_cycle_figure(
         ax.legend(handles, labels,
                   loc="center left", bbox_to_anchor=(1.0, 0.5),
                   fontsize=9, framealpha=0.9)
+
+    if sequence_note:
+        wrapped_note = textwrap.fill(sequence_note, width=52)
+        ax.text(
+            0.02,
+            0.98,
+            wrapped_note,
+            transform=ax.transAxes,
+            va="top",
+            ha="left",
+            fontsize=9,
+            bbox={
+                "boxstyle": "round,pad=0.35",
+                "facecolor": "white",
+                "edgecolor": "#666666",
+                "alpha": 0.93,
+            },
+        )
 
     fig.tight_layout()
     return fig
@@ -397,69 +417,30 @@ def build_animation(
     ylim_val:        float,
     filename:        str,
     out_dir:         str,
+    sequence_note_fn = None,
     fps:             int   = 5,
     dpi:             int   = 100,
     progress_cb             = None,
 ) -> str:
     """
-    Render each cycle as a PNG frame and stitch into an animated GIF.
+    Stitch the already-saved cycle PNGs into an animated GIF.
 
-    Requires Pillow (``pip install Pillow``).  Each frame is rendered with
-    ``matplotlib.figure.Figure`` + ``FigureCanvasAgg`` so no pyplot state is
-    touched (safe to call from a background thread).
+    Requires Pillow (``pip install Pillow``).  This reuses the exported cycle
+    plots directly, so the GIF matches the saved images exactly.
 
     Returns the output file path.
     """
     from PIL import Image
-    import io
-    from matplotlib.figure import Figure
-    from matplotlib.backends.backend_agg import FigureCanvasAgg
 
     frames = []
     n_frames = len(cycles_sorted)
-    last = cycles_sorted[-1] if cycles_sorted else 1
-
     for i, cycle in enumerate(cycles_sorted):
-        segs = build_segments(
-            cycle, cycle_points, cycle_start_map,
-            phased_seq, cyc_seq_map, assign_phase_fn,
-        )
+        frame_path = os.path.join(out_dir, f"cycle_{cycle:04d}.png")
+        if not os.path.isfile(frame_path):
+            raise FileNotFoundError(f"Missing cycle plot image: {frame_path}")
 
-        fig = Figure(figsize=(12, 7))
-        FigureCanvasAgg(fig)
-        fig.subplots_adjust(right=0.76, left=0.09, bottom=0.10, top=0.92)
-        ax = fig.add_subplot(111)
-
-        for pname in all_phase_names:
-            if pname not in segs:
-                continue
-            ts, ps = segs[pname]
-            ax.plot(ts, ps, linestyle="-", linewidth=1.4,
-                    color=phase_color_map.get(pname, "gray"), label=pname)
-
-        if "unassigned" in segs:
-            ts, ps = segs["unassigned"]
-            ax.plot(ts, ps, linestyle="-", linewidth=0.8,
-                    color="#cccccc", label="unassigned")
-
-        ax.set_xlabel("Time (s)", fontsize=11)
-        ax.set_ylabel("Pressure (mTorr)", fontsize=11)
-        ax.set_title(f"{filename}  —  Cycle {cycle} / {last}", fontsize=12)
-        ax.set_xlim(0, xlim_val)
-        ax.set_ylim(0, ylim_val)
-        ax.grid(True, alpha=0.35, linewidth=0.6)
-
-        handles, labels = ax.get_legend_handles_labels()
-        if handles:
-            ax.legend(handles, labels,
-                      loc="center left", bbox_to_anchor=(1.0, 0.5),
-                      fontsize=9, framealpha=0.9)
-
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=dpi)
-        buf.seek(0)
-        frames.append(Image.open(buf).copy())
-        buf.close()
+        with Image.open(frame_path) as img:
+            frames.append(img.convert("P", palette=Image.ADAPTIVE).copy())
 
         if progress_cb:
             progress_cb(i + 1, n_frames)
