@@ -13,13 +13,23 @@ HEADER_KEY_MAP = {
     "Wait time": "WaitTime",
     "EDR": "EDR",
     "DID": "DID",
+    # Removed in new format but kept for backward compatibility with old sheets
     "SID": "SID",
     "EID": "EID",
     "PID": "PID",
+    # Old valve-table row labels
     "Valve/precursor": "ValvePrecursor",
     "Name": "Name",
     "Temperature (C)": "TempC",
     "Temperature (C) ": "TempC",
+    # New valve-table row labels
+    "valve number": "ValvePrecursor",
+    "Valve number": "ValvePrecursor",
+    "valve name": "Name",
+    "Valve name": "Name",
+    "valve temperature": "TempC",
+    "Valve temperature": "TempC",
+    # Old informational fields (kept for backward compatibility)
     "Substrate": "Substrate",
     "Preexisting layer": "PreexistingLayer",
     "Preexisting layers": "PreexistingLayer",
@@ -35,6 +45,17 @@ HEADER_KEY_MAP = {
 
 def _clean_cell(value) -> str:
     return str(value).strip()
+
+
+def _sanitize_filename_text(value) -> str:
+    text = _clean_cell(value)
+    if not text:
+        return ""
+
+    for ch in '-<>:"/\\|?*':
+        text = text.replace(ch, "_")
+
+    return text.strip()
 
 
 def _coerce_token(token: str):
@@ -103,7 +124,7 @@ def extract_header_details(df: pd.DataFrame) -> tuple[str, dict]:
             continue
         values = row.iloc[1:].tolist()
 
-        if label == "User/File Name Info":
+        if label in {"User/File Name Info", "Username"}:
             username_base = _parse_header_value(label, values)
             continue
 
@@ -113,6 +134,98 @@ def extract_header_details(df: pd.DataFrame) -> tuple[str, dict]:
         details[mapped] = _parse_header_value(label, values)
 
     return username_base, details
+
+
+def validate_recipe_sheet(df: pd.DataFrame) -> list[str]:
+    """
+    Validate a recipe-sheet dataframe against the new workbook format requirements.
+
+    Skips validation silently for old-format sheets that still contain SID / EID / PID
+    rows (backward compatibility).
+
+    Returns a list of human-readable error strings; an empty list means the sheet
+    is valid (or is an old-format sheet that pre-dates these requirements).
+    """
+    errors: list[str] = []
+
+    if df.shape[0] < 10 or df.shape[1] < 2:
+        errors.append("Sheet must have at least 10 rows and 2 columns.")
+        return errors
+
+    def cell(row_0idx: int, col_0idx: int) -> str:
+        try:
+            return _clean_cell(str(df.iloc[row_0idx, col_0idx]))
+        except IndexError:
+            return ""
+
+    # Locate the recipe header row so we can inspect only the metadata section.
+    norm_col0 = df.iloc[:, 0].fillna("").astype(str).map(_clean_cell)
+    cycles_rows = norm_col0[norm_col0 == "Cycles"].index
+    if len(cycles_rows) == 0:
+        errors.append('Could not find the recipe header row (a row starting with "Cycles").')
+        return errors
+
+    recipe_header_idx = int(cycles_rows[0])
+
+    # Backward-compat: skip validation for old-format sheets that have SID/EID/PID rows.
+    pre_recipe_labels = set(norm_col0.iloc[:recipe_header_idx].values)
+    if pre_recipe_labels & {"SID", "EID", "PID"}:
+        return []
+
+    # --- structural row checks ------------------------------------------------
+    # Row 6 (0-based index 5), column B (index 1): Chamber valve slot must be "nan".
+    b6 = cell(5, 1)
+    if b6.lower() != "nan":
+        errors.append(
+            f'Row 6, column B (Chamber valve slot) must be "nan"; got "{b6}".'
+        )
+
+    # Row 7 (0-based index 6), column B (index 1): Chamber name must be "Chamber".
+    b7 = cell(6, 1)
+    if b7 != "Chamber":
+        errors.append(
+            f'Row 7, column B (Chamber name) must be "Chamber"; got "{b7}".'
+        )
+
+    # Row 8 (0-based index 7), column B (index 1): Chamber temperature must be numeric.
+    b8 = cell(7, 1)
+    try:
+        if not b8:
+            raise ValueError("empty")
+        float(b8)
+    except ValueError:
+        errors.append(
+            f'Row 8, column B (Chamber temperature) must be a number; got "{b8}".'
+        )
+
+    # --- valve coverage check -------------------------------------------------
+    # Declared valves: row 6, columns C–J (0-based indices 2–9).
+    declared_valves: set[str] = set()
+    for col_idx in range(2, min(10, df.shape[1])):
+        v = cell(5, col_idx)
+        if v and v.lower() != "nan":
+            declared_valves.add(v)
+
+    # Used valves: the Valve column (column B, index 1) of recipe data rows.
+    recipe_start_idx = recipe_header_idx + 1
+    if recipe_start_idx < df.shape[0] and df.shape[1] > 1:
+        valve_col = (
+            df.iloc[recipe_start_idx:, 1]
+            .fillna("")
+            .astype(str)
+            .map(_clean_cell)
+        )
+        used_valves = {v for v in valve_col if v}
+        missing = used_valves - declared_valves
+        if missing:
+            missing_str = ", ".join(
+                sorted(missing, key=lambda x: (not x.isdigit(), int(x) if x.isdigit() else x))
+            )
+            errors.append(
+                f"Valves used in the recipe but not declared in row 6: {missing_str}."
+            )
+
+    return errors
 
 
 def build_username(base_username: str, details: dict) -> str:
@@ -133,6 +246,144 @@ def build_username(base_username: str, details: dict) -> str:
     if suffixes:
         return "&".join(suffixes)
     return username
+
+
+def build_output_filename(df: pd.DataFrame) -> str | None:
+    report = build_output_filename_report(df)
+    return report["sanitized"] if report else None
+
+
+def build_output_filename_report(df: pd.DataFrame) -> dict | None:
+    """
+    Build a filename stem from the new-format workbook header.
+
+    Pattern (mirrors the workbook CONCAT formula):
+        {B1}_{A4}{B4}_{A5}{B5}_{B7}{B8}[_{name}{temp} for each active valve column]
+
+    Valve columns C onwards are only appended when:
+      - row 6 has a non-nan valve number in that column,
+      - row 7 has a non-empty name,
+      - row 8 has a numeric temperature, and
+      - that valve number appears in the recipe's Valve column.
+
+    Returns *None* for old-format sheets (those containing SID/EID/PID rows)
+    or when there is insufficient data to form a useful name.
+    """
+    if df.shape[0] < 10 or df.shape[1] < 2:
+        return None
+
+    def cell(row_0idx: int, col_0idx: int) -> str:
+        try:
+            return _clean_cell(str(df.iloc[row_0idx, col_0idx]))
+        except IndexError:
+            return ""
+
+    def fmt_num(text: str) -> str:
+        """'25.0' → '25'; non-numeric strings pass through unchanged."""
+        try:
+            f = float(text)
+            return str(int(f)) if f == int(f) else str(f)
+        except (ValueError, TypeError):
+            return text
+
+    def sanitize(text: str) -> str:
+        """Strip characters that are illegal in Windows file names."""
+        for ch in r'-\/:*?"<>|':
+            text = text.replace(ch, "_")
+        return text.strip("_ ")
+
+    # Detect old-format sheets — skip validation-style filename building.
+    norm_col0 = df.iloc[:, 0].fillna("").astype(str).map(_clean_cell)
+    cycles_rows = norm_col0[norm_col0 == "Cycles"].index
+    recipe_header_idx = int(cycles_rows[0]) if len(cycles_rows) else df.shape[0]
+    pre_labels = set(norm_col0.iloc[:recipe_header_idx].values)
+    if pre_labels & {"SID", "EID", "PID"}:
+        return None
+
+    # --- fixed header cells --------------------------------------------------
+    b1 = sanitize(cell(0, 1))            # Username value (B1)
+    a4 = sanitize(cell(3, 0))            # "EDR" label  (A4)
+    b4 = sanitize(cell(3, 1))            # EDR value    (B4)
+    a5 = sanitize(cell(4, 0))            # "DID" label  (A5)
+    b5_raw = cell(4, 1)                  # DID raw value (B5), may be comma-list
+    b7 = sanitize(cell(6, 1))            # Chamber name (B7)
+    b8 = fmt_num(cell(7, 1))            # Chamber temp (B8)
+
+    # Format DID: "117, 119" → "117-119"
+    if b5_raw:
+        did_parts = [fmt_num(_clean_cell(p)) for p in b5_raw.split(",") if _clean_cell(p)]
+        b5 = sanitize("-".join(did_parts))
+    else:
+        b5 = ""
+
+    # Collect valve numbers used in the recipe (Valve column = index 1).
+    used_valves: set[str] = set()
+    recipe_start_idx = recipe_header_idx + 1
+    if recipe_start_idx < df.shape[0] and df.shape[1] > 1:
+        valve_col = (
+            df.iloc[recipe_start_idx:, 1]
+            .fillna("")
+            .astype(str)
+            .map(_clean_cell)
+        )
+        used_valves = {v for v in valve_col if v}
+
+    # --- assemble parts -------------------------------------------------------
+    parts: list[str] = []
+    raw_parts: list[str] = []
+    if cell(0, 1):
+        raw_parts.append(cell(0, 1))
+    if cell(3, 0) and cell(3, 1):
+        raw_parts.append(cell(3, 0) + cell(3, 1))
+    if cell(4, 0) and b5_raw:
+        raw_parts.append(cell(4, 0) + b5_raw)
+    chamber_raw = cell(6, 1) + fmt_num(cell(7, 1))
+    if chamber_raw:
+        raw_parts.append(chamber_raw)
+
+    if b1:
+        parts.append(b1)
+    if a4 and b4:
+        parts.append(a4 + b4)
+    if a5 and b5:
+        parts.append(a5 + b5)
+    # Chamber (B7+B8) — always included.
+    chamber_seg = b7 + b8
+    if chamber_seg:
+        parts.append(chamber_seg)
+
+    # Additional valve columns C–J (0-based column indices 2–9).
+    for col_idx in range(2, min(10, df.shape[1])):
+        valve_num = cell(5, col_idx)   # row 6: declared valve number
+        name     = cell(6, col_idx)    # row 7: valve name
+        temp_raw = cell(7, col_idx)    # row 8: valve temperature
+
+        if not valve_num or valve_num.lower() == "nan":
+            continue
+        if not name:
+            continue
+        try:
+            if not temp_raw:
+                raise ValueError
+            float(temp_raw)
+        except ValueError:
+            continue
+        if valve_num not in used_valves:
+            continue
+
+        raw_parts.append(name + fmt_num(temp_raw))
+        parts.append(sanitize(name) + fmt_num(temp_raw))
+
+    if not parts:
+        return None
+
+    raw_name = "_".join(raw_parts) if raw_parts else ""
+    safe_name = "_".join(parts)
+    return {
+        "raw": raw_name,
+        "sanitized": safe_name,
+        "changed": raw_name != safe_name,
+    }
 
 
 def load_table(path: Path) -> pd.DataFrame:
@@ -283,6 +534,7 @@ def build_payload(
             payload_details["SequenceNotes"] = sequence_notes
 
     payload_username = username if username is not None else build_username(base_username, payload_details)
+    payload_username = _sanitize_filename_text(payload_username)
     if isinstance(payload_details, str):
         details_text = payload_details
     else:
@@ -321,6 +573,8 @@ def convert_recipe_sheet(
 ) -> tuple[dict, Path]:
     path = Path(input_path)
     df = load_table(path)
+    if username is None:
+        username = build_output_filename(df)
     payload = build_payload(df, username=username, details=details, rows=rows, cols=cols)
 
     output_path = Path(out_path) if out_path else path.with_name(f"{path.stem}_payload.json")

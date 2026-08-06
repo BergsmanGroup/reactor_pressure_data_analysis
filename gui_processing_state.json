@@ -3,11 +3,11 @@
     "xlim": "auto",
     "ylim": "auto",
     "shift": "2",
-    "wait_time": "0",
+    "wait_time": "3600",
     "fps": "5",
     "leakrate_phase_reduction": "0",
     "thickness_blank_rows": "0",
-    "write_condensed_json": false
+    "write_condensed_json": true
   },
   "valve_names_by_header": {
     "f39b8e411b9e3156b74209f37fa4a22950d4e2bc": {
@@ -82,6 +82,28 @@
       "5": "TDIC",
       "7": "GV",
       "8": "DAMDPA"
+    },
+    "ada1317a7b2f0c3b8deda41690fc1b5d80f9cf23": {
+      "5": "TDIC",
+      "7": "GV",
+      "8": "DAMDPA"
+    },
+    "eb063653417e47ab1c8fd4191717f489b7fa1370": {
+      "5": "Chamber",
+      "7": "GV",
+      "8": "TDIC"
+    },
+    "98570a7d2ab8d947b0888aac7300664ba6d3002e": {
+      "5": "TDIC",
+      "7": "GV",
+      "8": "DAMDPA",
+      "12": "LeakRate"
+    },
+    "7a9242f8a05fd0ab22197e70293690e2df5a9393": {
+      "5": "TDIC",
+      "7": "GV",
+      "8": "DAMDPA",
+      "12": "LeakRate"
     }
   },
   "valve_names_by_set": {
@@ -109,14 +131,21 @@
       "9": "9"
     },
     "5|7|8": {
+      "5": "Chamber",
+      "7": "GV",
+      "8": "TDIC"
+    },
+    "5|7|8|12": {
       "5": "TDIC",
       "7": "GV",
-      "8": "DAMDPA"
+      "8": "DAMDPA",
+      "12": "LeakRate"
     }
   },
   "last_valve_names": {
     "5": "TDIC",
     "7": "GV",
-    "8": "DAMDPA"
+    "8": "DAMDPA",
+    "12": "LeakRate"
   }
 }

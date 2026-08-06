@@ -49,7 +49,7 @@ from plot_utils  import (
     build_animation,
 )
 from ise_utils import save_ise_thickness_csv
-from convert_to_json import load_table, build_payload, save_payload
+from convert_to_json import load_table, build_payload, save_payload, validate_recipe_sheet, build_output_filename_report
 from header_editor import open_header_editor
 
 
@@ -83,6 +83,8 @@ class ReactorApp(tk.Tk):
         self._recipe_sheet_path = tk.StringVar()
         self._recipe_output_path = tk.StringVar()
         self._recipe_status_var = tk.StringVar(value="Load a recipe sheet to preview the payload.")
+        self._recipe_validation_var = tk.StringVar(value="")
+        self._recipe_username_warning_var = tk.StringVar(value="")
 
         # -- state -------------------------------------------------------------
         self._header_info:     dict = {}
@@ -243,12 +245,37 @@ class ReactorApp(tk.Tk):
             side="left", expand=True, fill="x", padx=(0, 4))
         ttk.Button(file_frame, text="Browse...",
                    command=self._browse_recipe_sheet).pack(side="left", padx=(0, 4))
-        ttk.Button(file_frame, text="Create JSON Payload",
-                   command=self._create_recipe_payload).pack(side="left", padx=(0, 4))
+        self._create_payload_btn = ttk.Button(file_frame, text="Create JSON Payload",
+                   command=self._create_recipe_payload)
+        self._create_payload_btn.pack(side="left", padx=(0, 4))
         ttk.Button(file_frame, text="Open Blank Sheet",
                command=self._open_blank_recipe_sheet).pack(side="left", padx=(0, 4))
         ttk.Button(file_frame, text="Open File Location",
                    command=self._open_recipe_file_location).pack(side="left")
+
+        validation_frame = ttk.Frame(parent)
+        validation_frame.pack(fill="x", padx=10, pady=(2, 0))
+        self._recipe_validation_label = tk.Label(
+            validation_frame,
+            textvariable=self._recipe_validation_var,
+            anchor="w",
+            justify="left",
+            foreground="red",
+            wraplength=900,
+        )
+        self._recipe_validation_label.pack(fill="x")
+
+        warning_frame = ttk.Frame(parent)
+        warning_frame.pack(fill="x", padx=10, pady=(2, 0))
+        self._recipe_username_warning_label = tk.Label(
+            warning_frame,
+            textvariable=self._recipe_username_warning_var,
+            anchor="w",
+            justify="left",
+            foreground="red",
+            wraplength=900,
+        )
+        self._recipe_username_warning_label.pack(fill="x")
 
         status_frame = ttk.Frame(parent)
         status_frame.pack(fill="x", **pad)
@@ -844,10 +871,16 @@ class ReactorApp(tk.Tk):
             return
 
         try:
-            payload = build_payload(load_table(Path(path)))
+            df = load_table(Path(path))
+            calculated_name_report = build_output_filename_report(df)
+            calculated_username = calculated_name_report["sanitized"] if calculated_name_report else None
+            payload = build_payload(df, username=calculated_username)
         except PermissionError:
             self._recipe_payload = {}
             self._recipe_status_var.set("ERROR: The selected recipe sheet is open in another program.")
+            self._recipe_validation_var.set("")
+            self._recipe_username_warning_var.set("")
+            self._create_payload_btn.configure(state="disabled")
             self._set_text_widget(
                 self._recipe_preview_box,
                 "Failed to load recipe sheet.\n\nThe file is open in another program. Close it and try again.",
@@ -856,8 +889,27 @@ class ReactorApp(tk.Tk):
         except Exception as exc:
             self._recipe_payload = {}
             self._recipe_status_var.set(f"ERROR: {exc}")
+            self._recipe_validation_var.set("")
+            self._recipe_username_warning_var.set("")
+            self._create_payload_btn.configure(state="disabled")
             self._set_text_widget(self._recipe_preview_box, f"Failed to load recipe sheet.\n\n{exc}")
             return
+
+        validation_errors = validate_recipe_sheet(df)
+        if validation_errors:
+            self._recipe_validation_var.set("\u26a0 " + "  \u2022  ".join(validation_errors))
+            self._create_payload_btn.configure(state="disabled")
+        else:
+            self._recipe_validation_var.set("")
+            self._create_payload_btn.configure(state="normal")
+
+        if calculated_name_report and calculated_name_report.get("changed"):
+            self._recipe_username_warning_var.set(
+                "Warning: the payload username was sanitized for filename safety. "
+                f"Saved value: {calculated_name_report['sanitized']}"
+            )
+        else:
+            self._recipe_username_warning_var.set("")
 
         out_path = self._recipe_output_path.get().strip()
         if not out_path:
@@ -880,7 +932,9 @@ class ReactorApp(tk.Tk):
                 return
 
         try:
-            payload = build_payload(load_table(Path(path)))
+            df = load_table(Path(path))
+            report = build_output_filename_report(df)
+            payload = build_payload(df, username=report["sanitized"] if report else None)
         except PermissionError:
             self._recipe_payload = {}
             self._recipe_status_var.set("ERROR: The selected recipe sheet is open in another program.")

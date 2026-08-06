@@ -34,6 +34,11 @@ if errorlevel 1 (
     exit /b 1
 )
 
+if not exist "gui_processing_state.json" (
+    echo Generating default GUI state file...
+    python -c "import json; from pathlib import Path; Path('gui_processing_state.json').write_text(json.dumps({'last_processing_settings': {}, 'valve_names_by_header': {}, 'valve_names_by_set': {}, 'last_valve_names': {}}, indent=2), encoding='utf-8')"
+)
+
 echo.
 echo Setup complete.
 echo You can run the app with:

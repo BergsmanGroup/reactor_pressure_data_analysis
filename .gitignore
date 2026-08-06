@@ -11,7 +11,12 @@ venv/
 # Jupyter checkpoints
 .ipynb_checkpoints/
 
+# GUI runtime state (auto-generated; do not track)
+gui_processing_state.json
+
 # Raw reactor data files (keep derived/example payload files trackable)
 *_Reactor*_Data.json
 *_Data.json
 data_files/
+gui_processing_state.json
+260803 TDIC & DAMDPA recipe sheet(3).xlsx

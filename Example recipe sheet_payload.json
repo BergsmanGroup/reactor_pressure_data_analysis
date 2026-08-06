@@ -1,17 +1,6 @@
 {
   "recipe": [
     [
-      "Cycles",
-      "Valve",
-      "PrePurge",
-      "N2Dose",
-      "PumpDose",
-      "Dose",
-      "Hold",
-      "PrePurge",
-      "Purge"
-    ],
-    [
       "1",
       "7",
       "0",
@@ -464,45 +453,5 @@
     ]
   ],
   "username": "Jay&TDIC&ED&Sat&Purge&Curve&EDR&DID117-119&SID152-153-154&EID26&PID4",
-  "experimentalDetails": {
-    "Info": "A new saturation and purge curve",
-    "WaitTime": 3600,
-    "EDR": true,
-    "DID": [
-      117,
-      119
-    ],
-    "SID": [
-      152,
-      153,
-      154
-    ],
-    "EID": [
-      26
-    ],
-    "PID": [
-      4
-    ],
-    "ValvePrecursor": [
-      "Chamber",
-      7,
-      12,
-      5,
-      6
-    ],
-    "Name": [
-      "Chamber",
-      "iSE",
-      "LeakRate",
-      "TDIC",
-      "ED"
-    ],
-    "TempC": [
-      25,
-      25,
-      25,
-      25,
-      25
-    ]
-  }
+  "experimentalDetails": "{\"Info\":\"A new saturation and purge curve\",\"WaitTime\":3600,\"EDR\":true,\"DID\":[117,119],\"SID\":[152,153,154],\"EID\":[26],\"PID\":[4],\"ValvePrecursor\":[\"Chamber\",7,12,5,6],\"Name\":[\"Chamber\",\"iSE\",\"LeakRate\",\"TDIC\",\"ED\"],\"TempC\":[25,25,25,25,25],\"ProcessTimeHr\":22.340278,\"EndTime\":\"2026-08-05 19:59:10\"}"
 }
