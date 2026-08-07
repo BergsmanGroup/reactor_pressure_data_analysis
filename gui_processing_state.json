@@ -1,10 +1,10 @@
 {
   "last_processing_settings": {
-    "xlim": "auto",
-    "ylim": "auto",
+    "xlim": "400",
+    "ylim": "1000",
     "shift": "2",
-    "wait_time": "3600",
-    "fps": "5",
+    "wait_time": "0",
+    "fps": "2",
     "leakrate_phase_reduction": "0",
     "thickness_blank_rows": "0",
     "write_condensed_json": true
@@ -104,6 +104,12 @@
       "7": "GV",
       "8": "DAMDPA",
       "12": "LeakRate"
+    },
+    "124b4a44c081ba8a47e98f9852fab2b8a99d7f5f": {
+      "3": "H2O",
+      "4": "TMA",
+      "7": "GV",
+      "10": "LeakRate"
     }
   },
   "valve_names_by_set": {
@@ -140,12 +146,18 @@
       "7": "GV",
       "8": "DAMDPA",
       "12": "LeakRate"
+    },
+    "3|4|7|10": {
+      "3": "H2O",
+      "4": "TMA",
+      "7": "GV",
+      "10": "LeakRate"
     }
   },
   "last_valve_names": {
-    "5": "TDIC",
+    "3": "H2O",
+    "4": "TMA",
     "7": "GV",
-    "8": "DAMDPA",
-    "12": "LeakRate"
+    "10": "LeakRate"
   }
 }

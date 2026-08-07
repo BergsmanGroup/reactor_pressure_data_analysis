@@ -224,10 +224,11 @@ def compute_exposure_table(
     For every cycle, compute trapezoidal exposure over only the ``dose`` and
     ``hold`` phases, combined into one integration per sequence/valve label.
 
-    If a sequence contains a valve named ``LeakRate``, the row also includes
-    ``LeakRate_leak_rate`` computed as the least-squares slope dP/dt over all
-    dose+hold points for that cycle after trimming the first and last
-    ``leakrate_phase_reduction`` seconds from the exposure window.
+    If a valve step has zero ``N2Dose + PumpDose + Dose`` and a nonzero
+    ``Hold``, the row also includes ``<valve>_leak_rate`` computed as the
+    least-squares slope dP/dt over that step's dose+hold pressure points after
+    trimming the first and last ``leakrate_phase_reduction`` seconds from the
+    exposure window.
 
     Returns a list of dicts, one row per sequence index (zero-based).
     Each row contains dynamic columns per valve label:
@@ -255,6 +256,19 @@ def compute_exposure_table(
             }
 
     phase_reduction = max(0.0, float(leakrate_phase_reduction or 0.0))
+
+    def _to_float(value):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _is_leakrate_step(timing):
+        vals = [_to_float(value) for value in timing]
+        if len(vals) < 5:
+            return False
+        dose_total = vals[1] + vals[2] + vals[3]
+        return abs(dose_total) <= 1e-12 and abs(vals[4]) > 1e-12
 
     def _least_squares_slope(times, pressures):
         n = len(times)
@@ -325,7 +339,7 @@ def compute_exposure_table(
             row[f"{col}_exposure"] = round(total_exposure, 4)
             row[f"{col}_mean_pressure"] = round(mean_p, 4)
 
-            if valve_label == "LeakRate":
+            if _is_leakrate_step(vals):
                 exposure_points = []
                 for tail in ("dose", "hold"):
                     seg = segs.get(f"{phase_head}_{tail}")
@@ -373,25 +387,29 @@ def save_exposure_csv(rows: list, out_dir: str, stem: str) -> str:
         "_mean_pressure",
         "_leak_rate",
     ]
+
+    def _has_value(value):
+        return value is not None and value != ""
+
+    prefix_suffix_has_value: dict = {}
     for row in rows:
         for key in row.keys():
             if key == "sequence":
                 continue
             for suffix in suffixes:
                 if key.endswith(suffix):
-                    valve_prefixes.add(key[: -len(suffix)])
+                    prefix = key[: -len(suffix)]
+                    valve_prefixes.add(prefix)
+                    prefix_suffix_has_value.setdefault(prefix, {}).setdefault(suffix, False)
+                    if _has_value(row.get(key)):
+                        prefix_suffix_has_value[prefix][suffix] = True
                     break
 
     fieldnames = ["sequence"]
     for prefix in sorted(valve_prefixes):
-        fieldnames.extend([
-            f"{prefix}_nominal_dose",
-            f"{prefix}_nominal_hold",
-            f"{prefix}_nominal_duration",
-            f"{prefix}_exposure",
-            f"{prefix}_mean_pressure",
-            f"{prefix}_leak_rate",
-        ])
+        for suffix in suffixes:
+            if prefix_suffix_has_value.get(prefix, {}).get(suffix, False):
+                fieldnames.append(f"{prefix}{suffix}")
 
     with open(out_path, "w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=fieldnames)

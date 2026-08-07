@@ -47,8 +47,15 @@ def _clean_cell(value) -> str:
     return str(value).strip()
 
 
-def _sanitize_filename_text(value) -> str:
+def _display_token(value) -> str:
     text = _clean_cell(value)
+    if text.lower() == "nan":
+        return "NaN"
+    return text
+
+
+def _sanitize_filename_text(value) -> str:
+    text = _display_token(value)
     if not text:
         return ""
 
@@ -62,6 +69,9 @@ def _coerce_token(token: str):
     token = _clean_cell(token)
     if token == "":
         return ""
+
+    if token.lower() == "nan":
+        return float("nan")
 
     upper = token.upper()
     if upper == "TRUE":
@@ -78,33 +88,143 @@ def _coerce_token(token: str):
         return token
 
 
+def _is_nan_value(value) -> bool:
+    return isinstance(value, float) and value != value
+
+
+def _parse_detail_token(token: str):
+    token = _clean_cell(token)
+    if token == "" or token.lower() == "nan":
+        return float("nan")
+
+    upper = token.upper()
+    if upper == "TRUE":
+        return True
+    if upper == "FALSE":
+        return False
+
+    try:
+        if any(ch in token for ch in (".", "e", "E")):
+            number = float(token)
+            return int(number) if number.is_integer() else number
+        return int(token)
+    except ValueError:
+        return token
+
+
+def _is_blank_like(value, *, zero_is_blank: bool = False) -> bool:
+    if value is None or _is_nan_value(value):
+        return True
+    if isinstance(value, bool):
+        return not value
+
+    text = _clean_cell(value)
+    if not text or text.lower() == "nan":
+        return True
+    if zero_is_blank:
+        try:
+            return float(text) == 0.0
+        except ValueError:
+            return False
+    return False
+
+
+def _is_truthy_detail(value) -> bool:
+    if _is_blank_like(value, zero_is_blank=True):
+        return False
+    if isinstance(value, (int, float)):
+        return float(value) != 0.0
+    text = _clean_cell(value).lower()
+    if text == "true":
+        return True
+    if text == "false":
+        return False
+    try:
+        return float(text) != 0.0
+    except ValueError:
+        return bool(text)
+
+
+def _normalize_compact_list(values, *, zero_is_blank: bool = False) -> list:
+    if not isinstance(values, list):
+        values = [] if _is_blank_like(values, zero_is_blank=zero_is_blank) else [values]
+
+    real_values = [value for value in values if not _is_blank_like(value, zero_is_blank=zero_is_blank)]
+    return real_values if real_values else [float("nan")]
+
+
+def _trim_trailing_blank_like(values, *, zero_is_blank: bool = False) -> list:
+    trimmed = list(values) if isinstance(values, list) else ([] if _is_blank_like(values, zero_is_blank=zero_is_blank) else [values])
+    while trimmed and _is_blank_like(trimmed[-1], zero_is_blank=zero_is_blank):
+        trimmed.pop()
+    return trimmed if trimmed else [float("nan")]
+
+
+def _normalize_detail_lists(details: dict) -> dict:
+    normalized = dict(details)
+
+    normalized["WaitTime"] = 0 if _is_blank_like(normalized.get("WaitTime"), zero_is_blank=True) else normalized.get("WaitTime", 0)
+    normalized["EDR"] = True if _is_truthy_detail(normalized.get("EDR")) else float("nan")
+    normalized["DID"] = _normalize_compact_list(normalized.get("DID", []), zero_is_blank=True)
+
+    valve_lists = {
+        "ValvePrecursor": True,
+        "Name": False,
+        "TempC": False,
+    }
+    trimmed_lists: dict[str, list] = {}
+    max_len = 0
+    for key, zero_is_blank in valve_lists.items():
+        trimmed = _trim_trailing_blank_like(normalized.get(key, []), zero_is_blank=zero_is_blank)
+        trimmed_lists[key] = trimmed
+        max_len = max(max_len, len(trimmed))
+
+    for key, zero_is_blank in valve_lists.items():
+        values = trimmed_lists[key]
+        if len(values) < max_len:
+            values = values + [float("nan")] * (max_len - len(values))
+        normalized[key] = values
+
+    lengths = {key: len(normalized[key]) for key in valve_lists}
+    if len(set(lengths.values())) != 1:
+        raise ValueError(
+            "ValvePrecursor, Name, and TempC must resolve to the same length; "
+            f"got {lengths}."
+        )
+
+    return normalized
+
+
 def _split_embedded_values(value: str) -> list[str]:
-    if "," not in value:
-        return [_clean_cell(value)] if _clean_cell(value) else []
-    return [_clean_cell(part) for part in value.split(",") if _clean_cell(part)]
+    cleaned = _clean_cell(value)
+    if not cleaned:
+        return [float("nan")]
+    if "," not in cleaned:
+        return [_parse_detail_token(cleaned)]
+    return [
+        _parse_detail_token(part) if _clean_cell(part) else float("nan")
+        for part in cleaned.split(",")
+    ]
 
 
 def _parse_header_value(label: str, row_values: list[str]):
-    cleaned = [_clean_cell(v) for v in row_values if _clean_cell(v)]
-    if not cleaned:
-        return ""
-
     if label in {"Info", "User/File Name Info"}:
-        return cleaned[0]
+        return _parse_detail_token(row_values[0] if row_values else "")
 
     if label == "Wait time":
-        return _coerce_token(cleaned[0])
+        token = _parse_detail_token(row_values[0] if row_values else "")
+        return 0 if _is_blank_like(token, zero_is_blank=True) else token
 
     if label == "EDR":
-        return bool(_coerce_token(cleaned[0]))
+        return _parse_detail_token(row_values[0] if row_values else "")
 
     if label in {"DID", "SID", "EID", "PID"}:
         tokens: list[str] = []
-        for value in cleaned:
+        for value in row_values:
             tokens.extend(_split_embedded_values(value))
-        return [_coerce_token(token) for token in tokens if token]
+        return tokens
 
-    return [_coerce_token(value) for value in cleaned]
+    return [_parse_detail_token(value) for value in row_values]
 
 
 def extract_header_details(df: pd.DataFrame) -> tuple[str, dict]:
@@ -154,7 +274,7 @@ def validate_recipe_sheet(df: pd.DataFrame) -> list[str]:
 
     def cell(row_0idx: int, col_0idx: int) -> str:
         try:
-            return _clean_cell(str(df.iloc[row_0idx, col_0idx]))
+            return _display_token(df.iloc[row_0idx, col_0idx])
         except IndexError:
             return ""
 
@@ -225,21 +345,43 @@ def validate_recipe_sheet(df: pd.DataFrame) -> list[str]:
                 f"Valves used in the recipe but not declared in row 6: {missing_str}."
             )
 
+    # Valve sequence rows must have a real valve number in column B.
+    if recipe_start_idx < df.shape[0] and df.shape[1] > 1:
+        bad_rows: list[int] = []
+        for row_idx in range(recipe_start_idx, df.shape[0]):
+            row_values = [cell(row_idx, col_idx) for col_idx in range(min(10, df.shape[1]))]
+            if not any(row_values):
+                continue
+            valve_num = _clean_cell(row_values[1])
+            if not valve_num or valve_num.lower() == "nan" or valve_num == "0":
+                bad_rows.append(row_idx + 1)
+
+        if bad_rows:
+            row_list = ", ".join(str(row_num) for row_num in bad_rows)
+            errors.append(
+                f"Valve sequence rows with blank or 0 valve numbers are not allowed: rows {row_list}."
+            )
+
     return errors
 
 
-def build_username(base_username: str, details: dict) -> str:
-    username = _clean_cell(base_username)
+def build_username(base_username: str, details: dict, exclude_falsey_edr_tags: bool = False) -> str:
+    username = _display_token(base_username)
     suffixes: list[str] = []
 
-    edr_enabled = bool(details.get("EDR"))
-    if edr_enabled:
+    edr_value = details.get("EDR")
+    if _is_truthy_detail(edr_value):
         suffixes.append("EDR")
+    elif not exclude_falsey_edr_tags:
+        suffixes.append("EDRNaN")
 
-        for key in ("DID", "SID", "EID", "PID"):
-            values = details.get(key, [])
-            if isinstance(values, list) and values:
-                suffixes.append(f"{key}{'-'.join(str(value) for value in values)}")
+    did_values = details.get("DID", [])
+    if isinstance(did_values, list):
+        real_values = [item for item in did_values if not _is_blank_like(item, zero_is_blank=True)]
+        if real_values:
+            suffixes.append("DID" + "-".join(_display_token(item) for item in real_values))
+        elif not exclude_falsey_edr_tags:
+            suffixes.append("DIDNaN")
 
     if username and suffixes:
         return "&".join([username, *suffixes])
@@ -248,12 +390,12 @@ def build_username(base_username: str, details: dict) -> str:
     return username
 
 
-def build_output_filename(df: pd.DataFrame) -> str | None:
-    report = build_output_filename_report(df)
+def build_output_filename(df: pd.DataFrame, exclude_falsey_edr_tags: bool = False) -> str | None:
+    report = build_output_filename_report(df, exclude_falsey_edr_tags=exclude_falsey_edr_tags)
     return report["sanitized"] if report else None
 
 
-def build_output_filename_report(df: pd.DataFrame) -> dict | None:
+def build_output_filename_report(df: pd.DataFrame, exclude_falsey_edr_tags: bool = False) -> dict | None:
     """
     Build a filename stem from the new-format workbook header.
 
@@ -274,23 +416,38 @@ def build_output_filename_report(df: pd.DataFrame) -> dict | None:
 
     def cell(row_0idx: int, col_0idx: int) -> str:
         try:
-            return _clean_cell(str(df.iloc[row_0idx, col_0idx]))
+            return _display_token(df.iloc[row_0idx, col_0idx])
         except IndexError:
             return ""
 
     def fmt_num(text: str) -> str:
         """'25.0' → '25'; non-numeric strings pass through unchanged."""
+        if _clean_cell(text).lower() == "nan":
+            return "NaN"
         try:
             f = float(text)
             return str(int(f)) if f == int(f) else str(f)
         except (ValueError, TypeError):
-            return text
+            return _display_token(text)
 
     def sanitize(text: str) -> str:
         """Strip characters that are illegal in Windows file names."""
+        text = _display_token(text)
         for ch in r'-\/:*?"<>|':
             text = text.replace(ch, "_")
         return text.strip("_ ")
+
+    def format_edr(value) -> str:
+        if _is_truthy_detail(value):
+            return "True"
+        return "" if exclude_falsey_edr_tags else "NaN"
+
+    def format_did(value: str) -> str:
+        raw_values = [part.strip() for part in str(value).split(",") if part.strip()] if value else []
+        real_values = [fmt_num(part) for part in raw_values if not _is_blank_like(part, zero_is_blank=True)]
+        if real_values:
+            return "-".join(real_values)
+        return "" if exclude_falsey_edr_tags else "NaN"
 
     # Detect old-format sheets — skip validation-style filename building.
     norm_col0 = df.iloc[:, 0].fillna("").astype(str).map(_clean_cell)
@@ -303,18 +460,14 @@ def build_output_filename_report(df: pd.DataFrame) -> dict | None:
     # --- fixed header cells --------------------------------------------------
     b1 = sanitize(cell(0, 1))            # Username value (B1)
     a4 = sanitize(cell(3, 0))            # "EDR" label  (A4)
-    b4 = sanitize(cell(3, 1))            # EDR value    (B4)
+    b4 = format_edr(cell(3, 1))          # EDR value    (B4)
     a5 = sanitize(cell(4, 0))            # "DID" label  (A5)
     b5_raw = cell(4, 1)                  # DID raw value (B5), may be comma-list
     b7 = sanitize(cell(6, 1))            # Chamber name (B7)
     b8 = fmt_num(cell(7, 1))            # Chamber temp (B8)
 
     # Format DID: "117, 119" → "117-119"
-    if b5_raw:
-        did_parts = [fmt_num(_clean_cell(p)) for p in b5_raw.split(",") if _clean_cell(p)]
-        b5 = sanitize("-".join(did_parts))
-    else:
-        b5 = ""
+    b5 = format_did(b5_raw)
 
     # Collect valve numbers used in the recipe (Valve column = index 1).
     used_valves: set[str] = set()
@@ -430,13 +583,25 @@ def extract_timing_table(
         timing_df = timing_df.iloc[:max_rows, :max_cols].copy()
         timing_df = timing_df.reset_index(drop=True)
 
+    for col_idx in range(timing_df.shape[1]):
+        if col_idx == 0:
+            timing_df.iloc[:, col_idx] = timing_df.iloc[:, col_idx].map(
+                lambda value: "" if _is_blank_like(value, zero_is_blank=True) else value
+            )
+        else:
+            timing_df.iloc[:, col_idx] = timing_df.iloc[:, col_idx].map(
+                lambda value: 0 if _clean_cell(value) == "" or _clean_cell(value).lower() == "nan" else value
+            )
+
     return timing_df.values.tolist()
 
 
 def _to_float(value) -> float:
     try:
         token = _clean_cell(value)
-        return float(token) if token else 0.0
+        if not token or token.lower() == "nan":
+            return 0.0
+        return float(token)
     except ValueError:
         return 0.0
 
@@ -499,15 +664,18 @@ def _extract_sequence_notes(df: pd.DataFrame) -> list[dict]:
         if cycle_cell:
             seq_index += 1
             current_cycles = cycle_cell
-            note_text = _clean_cell(row[9]) if len(row) > 9 else ""
-            if note_text:
-                notes.append(
-                    {
-                        "Seq": seq_index,
-                        "Cycles": _coerce_token(current_cycles),
-                        "Note": note_text,
-                    }
-                )
+        elif seq_index == 0:
+            continue
+
+        note_text = _clean_cell(row[9]) if len(row) > 9 else ""
+        if note_text:
+            notes.append(
+                {
+                    "Seq": seq_index,
+                    "Cycles": _coerce_token(current_cycles),
+                    "Note": note_text,
+                }
+            )
 
     return notes
 
@@ -518,6 +686,7 @@ def build_payload(
     details=None,
     rows: int | None = None,
     cols: int | None = None,
+    exclude_falsey_edr_tags: bool = False,
 ) -> dict:
     base_username, header_details = extract_header_details(df)
     if details is None:
@@ -532,8 +701,13 @@ def build_payload(
         sequence_notes = _extract_sequence_notes(df)
         if sequence_notes:
             payload_details["SequenceNotes"] = sequence_notes
+        payload_details = _normalize_detail_lists(payload_details)
 
-    payload_username = username if username is not None else build_username(base_username, payload_details)
+    payload_username = (
+        username
+        if username is not None
+        else build_username(base_username, payload_details, exclude_falsey_edr_tags=exclude_falsey_edr_tags)
+    )
     payload_username = _sanitize_filename_text(payload_username)
     if isinstance(payload_details, str):
         details_text = payload_details

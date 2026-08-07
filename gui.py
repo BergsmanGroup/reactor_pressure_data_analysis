@@ -79,6 +79,7 @@ class ReactorApp(tk.Tk):
         self._thickness_blank_rows_var = tk.StringVar(value="0")
         self._preview_cycle_var = tk.StringVar(value="1")
         self._write_condensed_json_var = tk.BooleanVar(value=True)
+        self._exclude_falsey_edr_tags_var = tk.BooleanVar(value=False)
         self._ise_file_path     = tk.StringVar()
         self._recipe_sheet_path = tk.StringVar()
         self._recipe_output_path = tk.StringVar()
@@ -253,6 +254,13 @@ class ReactorApp(tk.Tk):
         ttk.Button(file_frame, text="Open File Location",
                    command=self._open_recipe_file_location).pack(side="left")
 
+        ttk.Checkbutton(
+            parent,
+            text="Exclude falsey EDR tags from the username and filename",
+            variable=self._exclude_falsey_edr_tags_var,
+            command=self._load_recipe_sheet_preview,
+        ).pack(anchor="w", padx=12, pady=(0, 2))
+
         validation_frame = ttk.Frame(parent)
         validation_frame.pack(fill="x", padx=10, pady=(2, 0))
         self._recipe_validation_label = tk.Label(
@@ -289,9 +297,12 @@ class ReactorApp(tk.Tk):
             height=16,
             state="disabled",
             font=("Consolas", 9),
-            wrap="word",
+            wrap="none",
         )
         self._recipe_preview_box.pack(fill="both", expand=True)
+        preview_xscroll = ttk.Scrollbar(review_frame, orient="horizontal", command=self._recipe_preview_box.xview)
+        preview_xscroll.pack(fill="x")
+        self._recipe_preview_box.configure(xscrollcommand=preview_xscroll.set)
 
     # =========================================================================
     #  Utility helpers
@@ -404,24 +415,113 @@ class ReactorApp(tk.Tk):
 
     def _format_recipe_preview(self, csv_path: str, out_path: str, payload: dict) -> str:
         details_value = payload.get("experimentalDetails", "")
+        details_payload = None
         if isinstance(details_value, str):
             try:
                 parsed = json.loads(details_value)
             except (TypeError, ValueError):
                 details_json = details_value
             else:
+                details_payload = parsed if isinstance(parsed, dict) else None
                 details_json = self._format_header_details(parsed)
         else:
+            details_payload = details_value if isinstance(details_value, dict) else None
             details_json = self._format_header_details(details_value)
         recipe_rows = payload.get("recipe", [])
-        data_row_count = len(recipe_rows)
+        sequence_notes = details_payload.get("SequenceNotes", []) if isinstance(details_payload, dict) else []
+        timing_rows_text = self._format_timing_rows(recipe_rows, sequence_notes)
         return (
             f"Recipe sheet:\n{csv_path}\n\n"
             f"Output JSON:\n{out_path}\n\n"
             f"username:\n{payload.get('username', '')}\n\n"
             f"experimentalDetails:\n{details_json}\n\n"
-            f"Timing rows captured: {data_row_count}"
+            f"Timing rows:\n{timing_rows_text}"
         )
+
+    def _format_timing_rows(self, recipe_rows: list, sequence_notes: list | None = None) -> str:
+        if not recipe_rows:
+            return "(none)"
+
+        normalized_rows = [["" if value is None else str(value) for value in row] for row in recipe_rows]
+        note_rows = ["" for _ in normalized_rows]
+        notes_by_seq: dict[int, list[str]] = {}
+        notes_by_cycles: dict[int, list[str]] = {}
+        if isinstance(sequence_notes, list):
+            for entry in sequence_notes:
+                if not isinstance(entry, dict):
+                    continue
+                note_text = str(entry.get("Note", "")).strip()
+                if not note_text:
+                    continue
+                seq_value = entry.get("Seq", entry.get("Sequence"))
+                if seq_value not in (None, ""):
+                    try:
+                        notes_by_seq.setdefault(int(seq_value), []).append(note_text)
+                    except (TypeError, ValueError):
+                        pass
+                cycle_value = entry.get("Cycles")
+                if cycle_value not in (None, ""):
+                    try:
+                        notes_by_cycles.setdefault(int(cycle_value), []).append(note_text)
+                    except (TypeError, ValueError):
+                        pass
+
+        seq_index = 0
+        current_cycles = None
+        for row_index, row in enumerate(normalized_rows):
+            cycle_cell = row[0].strip() if row else ""
+            if cycle_cell:
+                seq_index += 1
+                current_cycles = None
+                try:
+                    current_cycles = int(float(cycle_cell))
+                except (TypeError, ValueError):
+                    current_cycles = None
+                notes = notes_by_seq.get(seq_index, [])
+                if not notes and current_cycles is not None:
+                    notes = notes_by_cycles.get(current_cycles, [])
+                if notes:
+                    note_rows[row_index] = " | ".join(notes)
+
+        base_headers = [
+            "Cycles",
+            "Valve #",
+            "Pre-dose Pump (s)",
+            "N2 Dose (s)",
+            "Pump Dose (s)",
+            "Dose (s)",
+            "Hold (s)",
+            "Pre-Purge (s)",
+            "Purge (s)",
+        ]
+        column_count = max((len(row) for row in normalized_rows), default=0)
+        if column_count == 0:
+            return "(none)"
+
+        headers = base_headers[:column_count] + ["Sequence Notes"]
+        output_column_count = column_count + 1
+
+        widths = [0] * output_column_count
+        for row in normalized_rows:
+            for index in range(column_count):
+                cell_text = row[index] if index < len(row) else ""
+                widths[index] = max(widths[index], len(cell_text))
+        for index, header in enumerate(headers):
+            widths[index] = max(widths[index], len(header))
+        for note_text in note_rows:
+            widths[column_count] = max(widths[column_count], len(note_text))
+
+        lines = []
+        lines.append("  ".join(headers[index].ljust(widths[index]) for index in range(output_column_count)).rstrip())
+        for row_index, row in enumerate(normalized_rows):
+            cells = []
+            for index in range(column_count):
+                cell_text = row[index] if index < len(row) else ""
+                cells.append(cell_text.rjust(widths[index]))
+            cells.append(note_rows[row_index].ljust(widths[column_count]))
+            lines.append("  ".join(cells).rstrip())
+
+        return "\n".join(lines)
 
     def _format_header_details(self, details_value) -> str:
         def _format_value(value, level: int = 0) -> str:
@@ -872,9 +972,17 @@ class ReactorApp(tk.Tk):
 
         try:
             df = load_table(Path(path))
-            calculated_name_report = build_output_filename_report(df)
+            exclude_falsey_edr_tags = self._exclude_falsey_edr_tags_var.get()
+            calculated_name_report = build_output_filename_report(
+                df,
+                exclude_falsey_edr_tags=exclude_falsey_edr_tags,
+            )
             calculated_username = calculated_name_report["sanitized"] if calculated_name_report else None
-            payload = build_payload(df, username=calculated_username)
+            payload = build_payload(
+                df,
+                username=calculated_username,
+                exclude_falsey_edr_tags=exclude_falsey_edr_tags,
+            )
         except PermissionError:
             self._recipe_payload = {}
             self._recipe_status_var.set("ERROR: The selected recipe sheet is open in another program.")
@@ -933,8 +1041,16 @@ class ReactorApp(tk.Tk):
 
         try:
             df = load_table(Path(path))
-            report = build_output_filename_report(df)
-            payload = build_payload(df, username=report["sanitized"] if report else None)
+            exclude_falsey_edr_tags = self._exclude_falsey_edr_tags_var.get()
+            report = build_output_filename_report(
+                df,
+                exclude_falsey_edr_tags=exclude_falsey_edr_tags,
+            )
+            payload = build_payload(
+                df,
+                username=report["sanitized"] if report else None,
+                exclude_falsey_edr_tags=exclude_falsey_edr_tags,
+            )
         except PermissionError:
             self._recipe_payload = {}
             self._recipe_status_var.set("ERROR: The selected recipe sheet is open in another program.")
