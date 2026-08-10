@@ -1,10 +1,10 @@
 {
   "last_processing_settings": {
-    "xlim": "400",
-    "ylim": "1000",
+    "xlim": "auto",
+    "ylim": "auto",
     "shift": "2",
     "wait_time": "0",
-    "fps": "2",
+    "fps": "5",
     "leakrate_phase_reduction": "0",
     "thickness_blank_rows": "0",
     "write_condensed_json": true
@@ -110,6 +110,12 @@
       "4": "TMA",
       "7": "GV",
       "10": "LeakRate"
+    },
+    "f21b6660a7ecc66c5d564e4667cdb61d40187faa": {
+      "3": "H2O",
+      "4": "TMA",
+      "7": "GV",
+      "10": "None"
     }
   },
   "valve_names_by_set": {
@@ -151,13 +157,13 @@
       "3": "H2O",
       "4": "TMA",
       "7": "GV",
-      "10": "LeakRate"
+      "10": "None"
     }
   },
   "last_valve_names": {
     "3": "H2O",
     "4": "TMA",
     "7": "GV",
-    "10": "LeakRate"
+    "10": "None"
   }
 }
