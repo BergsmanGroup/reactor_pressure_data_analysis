@@ -34,9 +34,9 @@ if errorlevel 1 (
     exit /b 1
 )
 
-if not exist "gui_processing_state.json" (
-    echo Generating default GUI state file...
-    python -c "import json; from pathlib import Path; Path('gui_processing_state.json').write_text(json.dumps({'last_processing_settings': {}, 'valve_names_by_header': {}, 'valve_names_by_set': {}, 'last_valve_names': {}}, indent=2), encoding='utf-8')"
+if not exist "config_local.json" (
+    echo Creating local config file from the default...
+    copy /y "config_default.json" "config_local.json" >nul
 )
 
 echo.

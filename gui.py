@@ -17,10 +17,11 @@ import os
 import re
 import json
 import subprocess
-import hashlib
 import shutil
 import tempfile
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import matplotlib
 matplotlib.use("Agg")
@@ -70,13 +71,13 @@ class ReactorApp(tk.Tk):
         # -- tk variables ------------------------------------------------------
         self._file_path         = tk.StringVar()
         self._output_dir        = tk.StringVar()
-        self._xlim_var          = tk.StringVar(value="auto")
-        self._ylim_var          = tk.StringVar(value="auto")
-        self._shift_var         = tk.StringVar(value="0")
-        self._wait_var          = tk.StringVar(value="0")
-        self._fps_var           = tk.StringVar(value="5")
-        self._leakrate_phase_reduction_var = tk.StringVar(value="0")
-        self._thickness_blank_rows_var = tk.StringVar(value="0")
+        self._xlim_var          = tk.StringVar()
+        self._ylim_var          = tk.StringVar()
+        self._shift_var         = tk.StringVar()
+        self._wait_var          = tk.StringVar()
+        self._fps_var           = tk.StringVar()
+        self._leakrate_phase_reduction_var = tk.StringVar()
+        self._thickness_blank_rows_var = tk.StringVar()
         self._preview_cycle_var = tk.StringVar(value="1")
         self._write_condensed_json_var = tk.BooleanVar(value=True)
         self._exclude_falsey_edr_tags_var = tk.BooleanVar(value=False)
@@ -95,12 +96,15 @@ class ReactorApp(tk.Tk):
         self._wait_entry = None
         self._cached:          dict = {}   # populated after a processing run
         self._recipe_payload:  dict = {}
-        self._settings_path = Path(__file__).with_name("gui_processing_state.json")
+        self._reactor_type: str | None = None
+        settings_dir = Path(__file__).parent
+        self._settings_path = settings_dir / "config_local.json"
+        self._default_settings_path = settings_dir / "config_default.json"
+        self._valve_name_log_path = settings_dir / "valve_name_log.jsonl"
         self._settings_state: dict = {
             "last_processing_settings": {},
-            "valve_names_by_header": {},
-            "valve_names_by_set": {},
             "last_valve_names": {},
+            "reactors": [],
         }
 
         self._load_settings_state()
@@ -732,6 +736,12 @@ class ReactorApp(tk.Tk):
         return "\n".join(lines)
 
     def _load_settings_state(self):
+        if not self._settings_path.exists() and self._default_settings_path.exists():
+            try:
+                shutil.copyfile(self._default_settings_path, self._settings_path)
+            except Exception:
+                pass
+
         if not self._settings_path.exists():
             return
         try:
@@ -744,28 +754,92 @@ class ReactorApp(tk.Tk):
             return
 
         last = data.get("last_processing_settings", {})
-        by_header = data.get("valve_names_by_header", {})
-        by_set = data.get("valve_names_by_set", {})
         last_valves = data.get("last_valve_names", {})
-
-        if isinstance(by_header, dict) and not isinstance(last_valves, dict):
-            last_valves = {}
-        if isinstance(by_header, dict) and not last_valves and by_header:
-            # Backward-compatibility: recover a fallback mapping from older state
-            # files that only persisted valve names by header hash.
-            try:
-                candidate = next(reversed(by_header.values()))
-                if isinstance(candidate, dict):
-                    last_valves = candidate
-            except Exception:
-                pass
+        reactors = data.get("reactors", [])
 
         self._settings_state = {
             "last_processing_settings": last if isinstance(last, dict) else {},
-            "valve_names_by_header": by_header if isinstance(by_header, dict) else {},
-            "valve_names_by_set": by_set if isinstance(by_set, dict) else {},
             "last_valve_names": last_valves if isinstance(last_valves, dict) else {},
+            "reactors": [str(reactor) for reactor in reactors if str(reactor).strip()]
+            if isinstance(reactors, list) else [],
         }
+
+    def _reactor_type_from_filename(self, file_path: str) -> str | None:
+        filename = Path(file_path).name
+        reactors = self._settings_state.get("reactors", [])
+        if not isinstance(reactors, list) or not reactors:
+            return None
+
+        reactor_pattern = "|".join(
+            re.escape(reactor)
+            for reactor in sorted(reactors, key=len, reverse=True)
+            if isinstance(reactor, str) and reactor
+        )
+        if not reactor_pattern:
+            return None
+
+        match = re.fullmatch(
+            rf"\d{{6}}_\d{{2}}h\d{{2}}m_{{1,2}}(?P<reactor>{reactor_pattern})"
+            rf".*_Reactor\d+_Data(?:_condensed)?\.json",
+            filename,
+        )
+        return match.group("reactor") if match else None
+
+    def _processed_datetime_from_filename(self, file_path: str) -> str | None:
+        match = re.match(
+            r"^(?P<date>\d{6})_(?P<time>\d{2}h\d{2}m)_",
+            Path(file_path).name,
+        )
+        if not match:
+            return None
+
+        try:
+            processed_at = datetime.strptime(
+                f"{match.group('date')}_{match.group('time')}",
+                "%y%m%d_%Hh%Mm",
+            ).replace(tzinfo=ZoneInfo("America/Los_Angeles"))
+        except ValueError:
+            return None
+        return processed_at.isoformat()
+
+    def _append_valve_name_log(self, file_path: str, valve_names: dict):
+        processed_datetime = self._processed_datetime_from_filename(file_path)
+        if processed_datetime is None:
+            self._log(f"WARNING: could not parse timestamp for valve name log: {Path(file_path).name}")
+            return
+
+        record = {
+            "data_file": Path(file_path).name,
+            "GUID": str(self._header_info.get("GUID", "")),
+            "valve_names": {
+                self._reactor_type: {
+                    str(vnum): str(name)
+                    for vnum, name in valve_names.items()
+                }
+            },
+            "process_datetime": processed_datetime,
+            "log_datetime": datetime.now(ZoneInfo("America/Los_Angeles")).isoformat(),
+        }
+        try:
+            if self._valve_name_log_path.exists():
+                with self._valve_name_log_path.open("r", encoding="utf-8") as fh:
+                    for line in fh:
+                        try:
+                            existing = json.loads(line)
+                            if not isinstance(existing, dict):
+                                continue
+                            existing.pop("log_datetime", None)
+                            comparable = dict(record)
+                            comparable.pop("log_datetime", None)
+                            if existing == comparable:
+                                return
+                        except (json.JSONDecodeError, TypeError):
+                            continue
+
+            with self._valve_name_log_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+        except Exception as exc:
+            self._log(f"WARNING: could not append valve name log: {exc}")
 
     def _save_settings_state(self):
         try:
@@ -807,29 +881,16 @@ class ReactorApp(tk.Tk):
         if leakrate_phase_reduction is not None:
             self._leakrate_phase_reduction_var.set(str(leakrate_phase_reduction))
 
-    def _header_settings_key(self) -> str:
-        if not self._seq_dict:
-            return ""
-        canonical = json.dumps(self._seq_dict, sort_keys=True, separators=(",", ":"))
-        return hashlib.sha1(canonical.encode("utf-8")).hexdigest()
-
-    def _valve_set_key(self) -> str:
-        valves = sorted(int(v) for v in self._valve_name_vars.keys())
-        return "|".join(str(v) for v in valves)
-
     def _apply_saved_valve_names(self):
-        key = self._header_settings_key()
-        by_header = self._settings_state.get("valve_names_by_header", {})
-        by_set = self._settings_state.get("valve_names_by_set", {})
-        last_valves = self._settings_state.get("last_valve_names", {})
+        saved_by_reactor = self._settings_state.get("last_valve_names", {})
+        if not isinstance(saved_by_reactor, dict):
+            return
 
-        saved = {}
-        if key:
-            saved = by_header.get(key, {})
-        if not saved:
-            saved = by_set.get(self._valve_set_key(), {})
-        if not saved:
-            saved = last_valves
+        saved = saved_by_reactor.get(self._reactor_type)
+        if not isinstance(saved, dict):
+            saved = saved_by_reactor if all(
+                not isinstance(value, dict) for value in saved_by_reactor.values()
+            ) else {}
         if not isinstance(saved, dict):
             return
 
@@ -856,14 +917,18 @@ class ReactorApp(tk.Tk):
             for vnum, name in valve_names.items()
         }
 
-        key = self._header_settings_key()
-        if key:
-            self._settings_state.setdefault("valve_names_by_header", {})[key] = names_payload
+        last_valve_names = self._settings_state.get("last_valve_names", {})
+        if not isinstance(last_valve_names, dict):
+            last_valve_names = {}
+        if all(not isinstance(value, dict) for value in last_valve_names.values()):
+            last_valve_names = {self._reactor_type: dict(last_valve_names)}
 
-        self._settings_state.setdefault("valve_names_by_set", {})[
-            self._valve_set_key()
-        ] = names_payload
-        self._settings_state["last_valve_names"] = names_payload
+        reactor_names = last_valve_names.setdefault(self._reactor_type, {})
+        if not isinstance(reactor_names, dict):
+            reactor_names = {}
+            last_valve_names[self._reactor_type] = reactor_names
+        reactor_names.update(names_payload)
+        self._settings_state["last_valve_names"] = last_valve_names
 
         self._save_settings_state()
 
@@ -1102,6 +1167,15 @@ class ReactorApp(tk.Tk):
         if not path or not os.path.isfile(path):
             self._log("ERROR: Select a valid file first.")
             return
+        self._reactor_type = self._reactor_type_from_filename(path)
+        if self._reactor_type is None:
+            self._log(
+                "ERROR: Filename must match "
+                "YYMMDD_HHhMMm_ReactorType<tags>_ReactorN_Data.json "
+                "or _Data_condensed.json "
+                "with a configured ReactorType."
+            )
+            return
         self._clear_log()
         try:
             self._header_info = read_header(path)
@@ -1231,11 +1305,11 @@ class ReactorApp(tk.Tk):
         valve_names = {vnum: var.get() for vnum, var in self._valve_name_vars.items()}
         xlim        = self._get_float(self._xlim_var)
         ylim        = self._get_float(self._ylim_var)
-        shift       = self._get_float(self._shift_var,  default=0.0)
-        wait_time   = self._get_float(self._wait_var,   default=0.0)
+        shift       = self._get_float(self._shift_var)
+        wait_time   = self._get_float(self._wait_var)
         leakrate_phase_reduction = max(
             0.0,
-            self._get_float(self._leakrate_phase_reduction_var, default=0.0) or 0.0,
+            self._get_float(self._leakrate_phase_reduction_var),
         )
         write_condensed_json = self._write_condensed_json_var.get()
 
@@ -1296,6 +1370,8 @@ class ReactorApp(tk.Tk):
                 if valve_name_payload:
                     details_payload = dict(details_payload)
                     details_payload["ValveNames"] = valve_name_payload
+
+            self._append_valve_name_log(path, valve_names)
 
             for sk, sd in phased_seq.items():
                 self._log(f"  {sk} bins (s): {sd.get('phase_bins', [])}")
@@ -1535,9 +1611,10 @@ class ReactorApp(tk.Tk):
             self._log("No data cached -- run processing first.")
             return
 
-        fps = self._get_float(self._fps_var, default=5.0)
-        if fps <= 0:
-            fps = 5.0
+        fps = self._get_float(self._fps_var)
+        if fps is None or fps <= 0:
+            self._log("ERROR: Animation FPS must be greater than zero.")
+            return
 
         self._process_btn.config(state="disabled")
         self._preview_btn.config(state="disabled")

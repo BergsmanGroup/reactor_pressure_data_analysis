@@ -27,7 +27,7 @@ The Reactor Pressure Data Analyzer is a desktop application for post-processing 
 
 ## 1. System Architecture
 
-The application is organized as a single-window Tkinter GUI (`reactor_plotter.py` → `gui.py`) that delegates all non-UI work to a set of stateless utility modules. Background work (file parsing, plot rendering) is dispatched to a `ThreadPoolExecutor` so the GUI remains responsive during long operations. Session parameters are persisted to `gui_processing_state.json` and reloaded on startup.
+The application is organized as a single-window Tkinter GUI (`reactor_plotter.py` → `gui.py`) that delegates all non-UI work to a set of stateless utility modules. Background work (file parsing, plot rendering) is dispatched to a `ThreadPoolExecutor` so the GUI remains responsive during long operations. Session parameters are persisted to the local `config_local.json` and reloaded on startup.
 
 ```
 reactor_plotter.py          Entry point; instantiates ReactorApp
@@ -261,19 +261,19 @@ Formats a filename stem encoding the key experimental identifiers:
 **`ReactorApp(tk.Tk)`** — the root window.
 
 **State management:**  
-On startup, `gui_processing_state.json` is read and all widget variables are populated from it. On exit (or after any processing run), current widget values are written back.
+On startup, the local `config_local.json` is read and all widget variables are populated from it. If it does not exist, it is copied from the tracked `config_default.json` template. Reactor header filenames identify the configured reactor type, and valve names are saved separately for each reactor type when processing starts.
 
 **Configurable parameters exposed in the GUI:**
 
 | Parameter | Default | Effect |
 |-----------|---------|--------|
-| X-axis limit | 600 s | Crop or expand time axis |
-| Y-axis limit | 2500 mTorr | Crop or expand pressure axis |
-| Phase shift | 0 s | Offset applied to all phase breakpoints |
-| Wait time | 0 s | Discard data before this elapsed time |
-| Animation FPS | 5 | Frame rate of output GIF |
-| Leak-rate trim | 5 s | Seconds dropped from edge of hold phase for regression |
-| iSE blank rows | 0 | Blank-row spacing in ellipsometer output CSV |
+| X-axis limit | `config_default.json` | Crop or expand time axis |
+| Y-axis limit | `config_default.json` | Crop or expand pressure axis |
+| Phase shift | `config_default.json` | Offset applied to all phase breakpoints |
+| Wait time | `config_default.json` | Discard data before this elapsed time |
+| Animation FPS | `config_default.json` | Frame rate of output GIF |
+| Leak-rate trim | `config_default.json` | Seconds dropped from edge of hold phase for regression |
+| iSE blank rows | `config_default.json` | Blank-row spacing in ellipsometer output CSV |
 
 **Threading:**  
 File reading and all plot-generation work runs in a `ThreadPoolExecutor`. Progress updates are posted to the main thread via `widget.after(0, callback)` to avoid Tkinter thread-safety issues. The log text box receives append calls through the same mechanism.
@@ -472,7 +472,7 @@ Activates `.venv`, confirms requirements, and starts the application. Alternativ
 python reactor_plotter.py
 ```
 
-**Session state** is automatically saved to `gui_processing_state.json` and restored on next launch, preserving all path selections, parameter values, and valve name mappings.
+**Session state** is automatically saved to the ignored local `config_local.json` and restored on next launch, preserving parameter values and per-reactor valve name mappings. The tracked `config_default.json` contains the clean first-run state and is copied only when the local file is missing. Each processing run appends the current file's valve names, header GUID, filename-derived `process_datetime`, actual write-time `log_datetime`, and data filename to the ignored local `valve_name_log.jsonl`.
 
 ---
 

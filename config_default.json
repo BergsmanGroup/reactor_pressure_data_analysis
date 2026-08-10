@@ -1,0 +1,22 @@
+{
+  "last_processing_settings": {
+    "xlim": "auto",
+    "ylim": "auto",
+    "shift": "2",
+    "wait_time": "0",
+    "fps": "5",
+    "leakrate_phase_reduction": "0",
+    "thickness_blank_rows": "0",
+    "write_condensed_json": true
+  },
+  "last_valve_names": {
+    "InSituReactor": {},
+    "HTReactor": {},
+    "MLDReactor": {}
+  },
+  "reactors": [
+    "InSituReactor",
+    "HTReactor",
+    "MLDReactor"
+  ]
+}
