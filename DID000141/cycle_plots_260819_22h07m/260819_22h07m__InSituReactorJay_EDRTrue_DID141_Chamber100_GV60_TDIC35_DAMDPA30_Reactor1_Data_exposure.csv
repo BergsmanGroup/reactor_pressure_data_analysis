@@ -1,0 +1,4 @@
+sequence,DAMDPA_nominal_dose,DAMDPA_nominal_hold,DAMDPA_nominal_duration,DAMDPA_exposure,DAMDPA_mean_pressure,TDIC_nominal_dose,TDIC_nominal_hold,TDIC_nominal_duration,TDIC_exposure,TDIC_mean_pressure
+1,0.0,60.0,60.0,44057.0553,710.5862,,,,,
+2,0.0,60.0,60.0,16038.172,258.2886,0.0,60.0,60.0,13824.3932,223.2874
+3,0.0,60.0,60.0,12937.3948,208.6677,0.0,60.0,60.0,8729.6164,140.798

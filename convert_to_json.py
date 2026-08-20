@@ -1,4 +1,5 @@
 import argparse
+import io
 import json
 from pathlib import Path
 import pandas as pd
@@ -544,7 +545,12 @@ def load_table(path: Path) -> pd.DataFrame:
     if ext == ".csv":
         return pd.read_csv(path, header=None, dtype=str, keep_default_na=False)
     if ext in {".xlsx", ".xls"}:
-        return pd.read_excel(path, header=None, dtype=str, keep_default_na=False)
+        # Read bytes first so the file handle is released before openpyxl parses,
+        # allowing the file to be open in Excel at the same time.
+        with open(path, "rb") as fh:
+            data = fh.read()
+        df = pd.read_excel(io.BytesIO(data), header=None, keep_default_na=False)
+        return df.fillna("").astype(str)
     raise ValueError(f"Unsupported file type: {ext}")
 
 
@@ -585,15 +591,29 @@ def extract_timing_table(
 
     for col_idx in range(timing_df.shape[1]):
         if col_idx == 0:
+            # Cycles: blank → "", non-blank → string of int
             timing_df.iloc[:, col_idx] = timing_df.iloc[:, col_idx].map(
-                lambda value: "" if _is_blank_like(value, zero_is_blank=True) else value
+                lambda v: "" if _is_blank_like(v, zero_is_blank=True) else str(int(float(_clean_cell(v))))
             )
-        else:
+        elif col_idx == 1:
+            # Valve number: blank → "0", non-blank → string of int
             timing_df.iloc[:, col_idx] = timing_df.iloc[:, col_idx].map(
-                lambda value: 0 if _clean_cell(value) == "" or _clean_cell(value).lower() == "nan" else value
+                lambda v: "0" if (_clean_cell(v) == "" or _clean_cell(v).lower() == "nan") else str(int(float(_clean_cell(v))))
             )
+        elif col_idx < RECIPE_SEQUENCE_COLS:
+            # Timing cols 2–8: blank → "0", non-blank → string of float
+            timing_df.iloc[:, col_idx] = timing_df.iloc[:, col_idx].map(_fmt_timing)
+        # col >= RECIPE_SEQUENCE_COLS (notes column): leave blank as ""
 
     return timing_df.values.tolist()
+
+
+def _fmt_timing(value) -> str:
+    token = _clean_cell(value)
+    if not token or token.lower() == "nan":
+        return "0"
+    f = float(token)
+    return str(int(f)) if f.is_integer() else str(f)
 
 
 def _to_float(value) -> float:
