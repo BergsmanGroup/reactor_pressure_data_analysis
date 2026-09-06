@@ -7,7 +7,6 @@ No GUI or I/O dependencies — safe to import anywhere.
 
 import re
 import copy
-import hashlib
 from colorsys import hsv_to_rgb
 import numpy as np
 
@@ -171,38 +170,50 @@ def _canonical_phase_name(phase_name: str) -> str:
     return phase_name
 
 
-def _stable_phase_color(phase_name: str) -> tuple[float, float, float, float]:
-    """
-    Generate a deterministic RGBA color from *phase_name*.
-
-    This keeps color assignment stable even when new phases appear, because the
-    color depends only on the canonical phase name and not on list order.
-    """
-    digest = hashlib.sha1(phase_name.encode("utf-8")).digest()
-    hue = int.from_bytes(digest[:4], "big") / 2**32
-    sat = 0.55 + (digest[4] / 255.0) * 0.25
-    val = 0.70 + (digest[5] / 255.0) * 0.20
-    red, green, blue = hsv_to_rgb(hue, sat, val)
-    return (red, green, blue, 1.0)
+_PHASE_COLORS = (
+    "#0072B2",  # blue
+    "#D55E00",  # vermillion
+    "#009E73",  # green
+    "#CC79A7",  # purple
+    "#E69F00",  # orange
+    "#56B4E9",  # sky blue
+    "#A65628",  # brown
+    "#F0E442",  # yellow
+    "#332288",  # indigo
+    "#117733",  # dark green
+    "#AA4499",  # magenta
+    "#44AA99",  # teal
+    "#999933",  # olive
+    "#88CCEE",  # light cyan
+    "#CC6677",  # rose
+    "#DDCC77",  # sand
+)
 
 
 def build_phase_color_map(all_phase_names: list, cmap_name: str = "tab20") -> dict:
     """
-    Return ``{phase_name: rgba_color}`` using a deterministic, sequence-
-    independent phase identity.
+    Return ``{phase_name: color}`` using an ordered, high-contrast palette.
 
     Example: ``seq1_6_dose`` and ``seq20_6_dose`` will receive the same color.
-    Adding new phases does not change any existing assignments.
+    Colors are assigned to canonical phase identities in first-seen order so
+    neighboring phases are visually distinct.  ``cmap_name`` is retained for
+    API compatibility with older callers.
     """
     canonical_colors: dict = {}
     phase_color_map: dict = {}
 
     for phase_name in all_phase_names:
         canonical_name = _canonical_phase_name(phase_name)
-        color = canonical_colors.setdefault(
-            canonical_name,
-            _stable_phase_color(canonical_name),
-        )
+        if canonical_name not in canonical_colors:
+            color_index = len(canonical_colors)
+            if color_index < len(_PHASE_COLORS):
+                color = _PHASE_COLORS[color_index]
+            else:
+                hue = (color_index * 0.61803398875) % 1.0
+                red, green, blue = hsv_to_rgb(hue, 0.72, 0.85)
+                color = (red, green, blue, 1.0)
+            canonical_colors[canonical_name] = color
+        color = canonical_colors[canonical_name]
         phase_color_map[phase_name] = color
 
     return phase_color_map

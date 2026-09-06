@@ -114,6 +114,8 @@ def draw_cycle_figure(
     grid_y:          bool = True,
     grid_x_spacing:  float | None = None,
     grid_y_spacing:  float | None = None,
+    phase_background: dict | None = None,
+    leakrate_regressions: list[dict] | None = None,
     figsize:         tuple = (10, 8),
 ) -> plt.Figure:
     """
@@ -124,6 +126,60 @@ def draw_cycle_figure(
     """
     fig = plt.Figure(figsize=figsize)
     ax = fig.add_subplot(111)
+
+    if phase_background:
+        background_bins = phase_background.get("phase_bins", [])
+        background_names = phase_background.get("phase_names", [])
+        for index, phase_name in enumerate(background_names):
+            if index + 1 >= len(background_bins):
+                break
+            start = max(0.0, background_bins[index])
+            end = min(xlim, background_bins[index + 1])
+            if end <= start:
+                continue
+            ax.axvspan(
+                start,
+                end,
+                color=phase_color_map.get(phase_name, "#cccccc"),
+                alpha=0.14,
+                linewidth=0,
+                zorder=0,
+            )
+
+    for regression in leakrate_regressions or []:
+        start = regression["start"]
+        end = regression["end"]
+        slope = regression["slope"]
+        intercept = regression["intercept"]
+        color = phase_color_map.get(regression["phase_name"], "#333333")
+        ax.axvline(start, color=color, linestyle="--", linewidth=1.2, zorder=2)
+        ax.axvline(end, color=color, linestyle="--", linewidth=1.2, zorder=2)
+        ax.plot(
+            [start, end],
+            [intercept + slope * start, intercept + slope * end],
+            color="black",
+            linestyle="--",
+            linewidth=3.0,
+            zorder=5,
+        )
+        midpoint = (start + end) / 2.0
+        ax.annotate(
+            f"Leak rate: {regression['leak_rate']:.3f} mTorr/min",
+            xy=(midpoint, intercept + slope * midpoint),
+            xytext=(0, 12),
+            textcoords="offset points",
+            ha="center",
+            va="bottom",
+            fontsize=8,
+            color=color,
+            bbox={
+                "boxstyle": "round,pad=0.25",
+                "facecolor": "white",
+                "edgecolor": color,
+                "alpha": 0.88,
+            },
+            zorder=4,
+        )
 
     for pname in all_phase_names:
         if pname not in segments:
@@ -223,6 +279,57 @@ def compute_axis_limits(
     return (max_ct or 600.0), (max_p or 2500.0)
 
 
+def compute_leakrate_regressions(
+    cycle:           int,
+    cycle_points:    dict,
+    cycle_start_map: dict,
+    phased_seq:      dict,
+    cyc_seq_map:     dict,
+    assign_phase_fn,
+    phase_reduction: float = 0.0,
+) -> list[dict]:
+    """Return trimmed LeakRate regression metadata for one cycle."""
+    segs = build_segments(
+        cycle, cycle_points, cycle_start_map,
+        phased_seq, cyc_seq_map, assign_phase_fn,
+    )
+    reduction = max(0.0, float(phase_reduction or 0.0))
+    regressions = []
+
+    for phase_name, (times, pressures) in segs.items():
+        if not str(phase_name).endswith("_LeakRate") or len(times) < 2:
+            continue
+        start = times[0] + reduction
+        end = times[-1] - reduction
+        trimmed = [
+            (time, pressure)
+            for time, pressure in zip(times, pressures)
+            if start <= time <= end
+        ]
+        if len(trimmed) < 2:
+            continue
+        fit_times = [time for time, _ in trimmed]
+        fit_pressures = [pressure for _, pressure in trimmed]
+        mean_time = sum(fit_times) / len(fit_times)
+        mean_pressure = sum(fit_pressures) / len(fit_pressures)
+        ss_tt = sum((time - mean_time) ** 2 for time in fit_times)
+        if ss_tt <= 0:
+            continue
+        slope = sum(
+            (fit_times[index] - mean_time) * (fit_pressures[index] - mean_pressure)
+            for index in range(len(trimmed))
+        ) / ss_tt
+        regressions.append({
+            "phase_name": phase_name,
+            "start": start,
+            "end": end,
+            "slope": slope,
+            "intercept": mean_pressure - slope * mean_time,
+            "leak_rate": 60.0 * slope,
+        })
+    return regressions
+
+
 # ---------------------------------------------------------------------------
 #  Exposure table  (pressure × time integral for dose+hold per cycle)
 # ---------------------------------------------------------------------------
@@ -285,24 +392,20 @@ def compute_exposure_table(
         except (TypeError, ValueError):
             return 0.0
 
-    def _least_squares_slope(times, pressures):
-        n = len(times)
-        if n < 2:
-            return None
-        mean_t = sum(times) / n
-        mean_p = sum(pressures) / n
-        ss_tt = sum((t - mean_t) ** 2 for t in times)
-        if ss_tt <= 0:
-            return None
-        ss_tp = sum((times[i] - mean_t) * (pressures[i] - mean_p) for i in range(n))
-        return ss_tp / ss_tt
-
     rows = []
     for cycle in cycles_sorted:
         segs = build_segments(
             cycle, cycle_points, cycle_start_map,
             phased_seq, cyc_seq_map, assign_phase_fn,
         )
+        leakrate_regressions = {
+            entry["phase_name"]: entry
+            for entry in compute_leakrate_regressions(
+                cycle, cycle_points, cycle_start_map,
+                phased_seq, cyc_seq_map, assign_phase_fn,
+                phase_reduction,
+            )
+        }
         grouped: dict = {}
 
         for phase_name, (times, pressures) in segs.items():
@@ -356,21 +459,9 @@ def compute_exposure_table(
 
             # Leak rate: present when the phase_head has a dedicated LeakRate segment.
             leakrate_seg = segs.get(f"{phase_head}_LeakRate")
-            if leakrate_seg and len(leakrate_seg[0]) >= 2:
-                times_lr, pressures_lr = leakrate_seg
-                t_start = times_lr[0] + phase_reduction
-                t_end   = times_lr[-1] - phase_reduction
-                trimmed = [
-                    (t, p) for t, p in zip(times_lr, pressures_lr)
-                    if t_start <= t <= t_end
-                ]
-                if len(trimmed) >= 2:
-                    t_trim = [t for t, _ in trimmed]
-                    p_trim = [p for _, p in trimmed]
-                    # Segment times are seconds; expose leak rate in mTorr/min.
-                    leak_slope = 60.0 * _least_squares_slope(t_trim, p_trim)
-                    if leak_slope is not None:
-                        row[f"{col}_leak_rate"] = round(leak_slope, 6)
+            regression = leakrate_regressions.get(f"{phase_head}_LeakRate")
+            if leakrate_seg and regression:
+                row[f"{col}_leak_rate"] = round(regression["leak_rate"], 6)
 
             has_nonzero_exposure = True
 

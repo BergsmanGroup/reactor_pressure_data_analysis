@@ -11,6 +11,7 @@ Imports the three pure-logic modules and wires them to the UI:
 
 import tkinter as tk
 from tkinter import ttk, filedialog, scrolledtext, messagebox
+import difflib
 import threading
 from concurrent.futures import ThreadPoolExecutor
 import os
@@ -43,6 +44,7 @@ from data_parser import (
 from plot_utils  import (
     build_segments,
     draw_cycle_figure,
+    compute_leakrate_regressions,
     save_cycle_figure,
     compute_axis_limits,
     compute_exposure_table,
@@ -52,6 +54,12 @@ from plot_utils  import (
 from ise_utils import save_ise_thickness_csv
 from convert_to_json import load_table, build_payload, save_payload, validate_recipe_sheet, build_output_filename_report
 from header_editor import open_header_editor
+from header_text import (
+    compare_header_payloads,
+    normalized_header_text,
+    parse_header_text,
+    save_converted_header,
+)
 
 
 class SaveAbortedError(Exception):
@@ -70,6 +78,8 @@ class ReactorApp(tk.Tk):
 
         # -- tk variables ------------------------------------------------------
         self._file_path         = tk.StringVar()
+        self._header_txt_path    = tk.StringVar()
+        self._header_comparison_warning_var = tk.StringVar()
         self._output_dir        = tk.StringVar()
         self._xlim_var          = tk.StringVar()
         self._ylim_var          = tk.StringVar()
@@ -91,6 +101,7 @@ class ReactorApp(tk.Tk):
         self._recipe_status_var = tk.StringVar(value="Load a recipe sheet to preview the payload.")
         self._recipe_validation_var = tk.StringVar(value="")
         self._recipe_username_warning_var = tk.StringVar(value="")
+        self._file_path.trace_add("write", self._on_raw_file_path_changed)
 
         # -- state -------------------------------------------------------------
         self._header_info:     dict = {}
@@ -149,6 +160,42 @@ class ReactorApp(tk.Tk):
         ttk.Button(file_frame, text="Open File Location",
                    command=self._open_raw_file_location).pack(side="left")
 
+        self._header_txt_frame = ttk.LabelFrame(parent, text="Header Text File", padding=8)
+        self._header_txt_frame.pack(fill="x", padx=10, pady=4)
+        self._header_txt_entry = ttk.Entry(
+            self._header_txt_frame,
+            textvariable=self._header_txt_path,
+        )
+        self._header_txt_entry.pack(side="left", expand=True, fill="x", padx=(0, 4))
+        self._header_txt_browse_btn = ttk.Button(
+            self._header_txt_frame,
+            text="Browse...",
+            command=self._browse_header_txt,
+        )
+        self._header_txt_browse_btn.pack(side="left", padx=(0, 4))
+        ttk.Button(
+            self._header_txt_frame,
+            text="Open File Location",
+            command=self._open_header_txt_location,
+        ).pack(side="left")
+        ttk.Button(
+            self._header_txt_frame,
+            text="Compare Headers",
+            command=self._compare_header_text_file,
+        ).pack(side="left", padx=(6, 0))
+        ttk.Button(
+            self._header_txt_frame,
+            text="Use Header JSON",
+            command=self._use_header_text_as_raw_header,
+        ).pack(side="left", padx=(6, 0))
+        tk.Label(
+            self._header_txt_frame,
+            textvariable=self._header_comparison_warning_var,
+            foreground="red",
+            anchor="w",
+            justify="left",
+        ).pack(side="left", padx=(8, 0))
+
         # -- iSE thickness source file ----------------------------------------
         ise_frame = ttk.LabelFrame(parent, text="iSE Data File", padding=8)
         ise_frame.pack(fill="x", **pad)
@@ -175,6 +222,11 @@ class ReactorApp(tk.Tk):
         ttk.Entry(out_frame, textvariable=self._output_dir, width=40).pack(
             side="left", expand=True, fill="x", padx=(0, 4))
         ttk.Button(out_frame, text="Browse...", command=self._browse_output).pack(side="left")
+        ttk.Button(
+            out_frame,
+            text="Open Output Directory",
+            command=self._open_output_directory,
+        ).pack(side="left", padx=(4, 0))
 
         plot_frame = ttk.LabelFrame(opt_outer, text="Plot Options", padding=8)
         plot_frame.pack(side="left")
@@ -974,6 +1026,149 @@ class ReactorApp(tk.Tk):
         folder = f"cycle_plots_{suffix}" if suffix else "cycle_plots"
         return str(p.parent / folder)
 
+    def _predicted_header_txt_path(self, file_path: str) -> str:
+        path = Path(file_path)
+        parent_name = path.parent.name.casefold()
+        reactor_data_dir = path.parent.parent
+        if parent_name != "json files" or reactor_data_dir.name.casefold() != "reactor data":
+            return ""
+
+        match = re.match(r"^(?P<date>\d{6})_", path.name)
+        if not match:
+            return ""
+        try:
+            month_dir = datetime.strptime(match.group("date"), "%y%m%d").strftime("%B %Y")
+        except ValueError:
+            return ""
+
+        header_name = re.sub(r"_Data(?:_condensed)?\.json$", "_Header.txt", path.name, flags=re.IGNORECASE)
+        if header_name == path.name:
+            return ""
+        return str(reactor_data_dir / "Text Files" / month_dir / header_name)
+
+    def _update_header_txt_path(self, file_path: str):
+        self._header_txt_path.set(self._predicted_header_txt_path(file_path))
+
+    def _on_raw_file_path_changed(self, *_args):
+        self._update_header_txt_path(self._file_path.get().strip())
+        self._header_comparison_warning_var.set("")
+
+    def _compare_header_text_file(self):
+        self._header_comparison_warning_var.set("")
+        raw_path = self._file_path.get().strip()
+        header_path = self._header_txt_path.get().strip()
+        if not raw_path or not os.path.isfile(raw_path) or not os.path.isfile(header_path):
+            self._header_comparison_warning_var.set("Warning: select existing raw and header text files first.")
+            return
+        try:
+            text_payload = parse_header_text(header_path)
+            converted_path = save_converted_header(header_path, text_payload)
+            raw_payload = read_header(raw_path)
+            differences = compare_header_payloads(raw_payload, text_payload)
+        except Exception as exc:
+            self._header_comparison_warning_var.set(f"Header comparison warning: {exc}")
+            return
+
+        if differences:
+            fields = ", ".join(differences)
+            self._header_comparison_warning_var.set(
+                f"Warning: header.txt differs from raw header ({fields}). Converted: {converted_path.name}"
+            )
+            self._show_header_diff_popup(raw_payload, text_payload, fields)
+        else:
+            self._header_comparison_warning_var.set(f"Headers match. Saved {converted_path.name}.")
+
+    def _show_header_diff_popup(self, raw_payload: dict, text_payload: dict, fields: str):
+        popup = tk.Toplevel(self)
+        popup.title(f"Header Differences: {fields}")
+        popup.geometry("1200x720")
+        popup.transient(self)
+
+        ttk.Label(
+            popup,
+            text="Different field: valveSequence",
+            foreground="red",
+        ).pack(anchor="w", padx=10, pady=(8, 4))
+
+        panes = ttk.Frame(popup)
+        panes.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+        panes.columnconfigure(0, weight=1)
+        panes.columnconfigure(1, weight=1)
+        panes.rowconfigure(1, weight=1)
+        ttk.Label(panes, text="Raw data JSON valve sequence").grid(row=0, column=0, sticky="w", padx=(0, 4))
+        ttk.Label(panes, text="Header text valve sequence").grid(row=0, column=1, sticky="w", padx=(4, 0))
+
+        left = scrolledtext.ScrolledText(panes, wrap="none", font=("Consolas", 9))
+        right = scrolledtext.ScrolledText(panes, wrap="none", font=("Consolas", 9))
+        left.grid(row=1, column=0, sticky="nsew", padx=(0, 4))
+        right.grid(row=1, column=1, sticky="nsew", padx=(4, 0))
+        left.tag_configure("changed", background="#ffd6d6")
+        right.tag_configure("changed", background="#fff0b3")
+
+        left_lines = normalized_header_text(raw_payload).splitlines()
+        right_lines = normalized_header_text(text_payload).splitlines()
+        matcher = difflib.SequenceMatcher(None, left_lines, right_lines)
+        left_row = 1
+        right_row = 1
+
+        def insert_line(widget, line, row, changed):
+            start = f"{row}.0"
+            widget.insert("end", line + "\n")
+            if changed:
+                widget.tag_add("changed", start, f"{row}.end")
+
+        for operation, left_start, left_end, right_start, right_end in matcher.get_opcodes():
+            if operation == "equal":
+                for left_line, right_line in zip(left_lines[left_start:left_end], right_lines[right_start:right_end]):
+                    insert_line(left, left_line, left_row, False)
+                    insert_line(right, right_line, right_row, False)
+                    left_row += 1
+                    right_row += 1
+            else:
+                left_chunk = left_lines[left_start:left_end]
+                right_chunk = right_lines[right_start:right_end]
+                for index in range(max(len(left_chunk), len(right_chunk))):
+                    left_line = left_chunk[index] if index < len(left_chunk) else ""
+                    right_line = right_chunk[index] if index < len(right_chunk) else ""
+                    insert_line(left, left_line, left_row, bool(left_line))
+                    insert_line(right, right_line, right_row, bool(right_line))
+                    left_row += 1
+                    right_row += 1
+
+        left.configure(state="disabled")
+        right.configure(state="disabled")
+        ttk.Button(popup, text="Close", command=popup.destroy).pack(anchor="e", padx=10, pady=(0, 8))
+
+    def _use_header_text_as_raw_header(self):
+        raw_path = self._file_path.get().strip()
+        header_path = self._header_txt_path.get().strip()
+        if not raw_path or not os.path.isfile(raw_path) or not os.path.isfile(header_path):
+            self._header_comparison_warning_var.set("Warning: select existing raw and header text files first.")
+            return
+        try:
+            text_payload = parse_header_text(header_path)
+            self._rewrite_header_payload(raw_path, text_payload)
+        except Exception as exc:
+            self._header_comparison_warning_var.set(f"Warning: could not replace raw header: {exc}")
+            return
+
+        self._header_comparison_warning_var.set("Raw data header replaced from header.txt.")
+        self._load_header()
+
+    def _browse_header_txt(self):
+        path = filedialog.askopenfilename(
+            title="Select Header Text File",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+        )
+        if path:
+            self._header_txt_path.set(path)
+
+    def _open_header_txt_location(self):
+        self._open_path_in_explorer(self._header_txt_path.get(), "header text file")
+
+    def _open_output_directory(self):
+        self._open_path_in_explorer(self._output_dir.get(), "output directory")
+
     # =========================================================================
     #  File browsing
     # =========================================================================
@@ -985,6 +1180,7 @@ class ReactorApp(tk.Tk):
         if path:
             self._file_path.set(path)
             self._output_dir.set(self._default_output_dir_for_file(path))
+            self._update_header_txt_path(path)
             self._load_header()
 
     def _browse_output(self):
@@ -1242,6 +1438,7 @@ class ReactorApp(tk.Tk):
         self._apply_detail_valve_names(self._header_info.get("experimentalDetails", ""))
         self._apply_detail_wait_time(self._header_info.get("experimentalDetails", ""))
         self._process_btn.config(state="normal")
+        self._preview_btn.config(state="normal")
         self._edit_header_btn.config(state="normal")
 
     def _rewrite_header_payload(self, file_path: str, payload: dict):
@@ -1742,8 +1939,9 @@ class ReactorApp(tk.Tk):
     # =========================================================================
 
     def _preview_plot(self):
-        if not self._cached:
-            self._log("No data cached -- run processing first.")
+        path = self._file_path.get().strip()
+        if not path or not os.path.isfile(path) or not self._header_info:
+            self._log("Load a valid data file and header before previewing.")
             return
 
         try:
@@ -1752,41 +1950,120 @@ class ReactorApp(tk.Tk):
             self._log("ERROR: Preview cycle must be an integer.")
             return
 
-        c = self._cached
-        if cycle not in c["cycle_points"]:
-            avail = sorted(c["cycle_points"].keys())
-            self._log(f"ERROR: Cycle {cycle} not found. "
-                      f"Available range: {avail[0]}..{avail[-1]}")
+        wait_time = self._get_float(self._wait_var) or 0.0
+        xlim = self._get_float(self._xlim_var)
+        ylim = self._get_float(self._ylim_var)
+        grid_x_spacing = self._get_float(self._grid_x_spacing_var)
+        grid_y_spacing = self._get_float(self._grid_y_spacing_var)
+        leakrate_phase_reduction = max(
+            0.0,
+            self._get_float(self._leakrate_phase_reduction_var),
+        )
+        if grid_x_spacing is not None and grid_x_spacing <= 0:
+            self._log("ERROR: X grid spacing must be greater than zero.")
+            return
+        if grid_y_spacing is not None and grid_y_spacing <= 0:
+            self._log("ERROR: Y grid spacing must be greater than zero.")
             return
 
-        segs = build_segments(
-            cycle,
-            c["cycle_points"], c["cycle_start_map"],
-            c["phased_seq"],   c["cyc_seq_map"],
-            assign_phase,
-        )
+        self._process_btn.config(state="disabled")
+        self._preview_btn.config(state="disabled")
+        self._set_progress(0)
+        threading.Thread(
+            target=self._run_preview,
+            args=(
+                path, cycle, xlim, ylim,
+                self._grid_x_var.get(), self._grid_y_var.get(),
+                grid_x_spacing, grid_y_spacing, wait_time,
+                leakrate_phase_reduction,
+            ),
+            daemon=True,
+        ).start()
 
-        details_payload = c.get("experimental_details", {})
+    def _run_preview(
+        self, path, cycle, xlim, ylim, grid_x, grid_y,
+        grid_x_spacing, grid_y_spacing, wait_time, leakrate_phase_reduction,
+    ):
+        try:
+            valve_names = {vnum: var.get() for vnum, var in self._valve_name_vars.items()}
+            named_seq = apply_valve_names(self._seq_dict, valve_names)
+            shift = self._get_float(self._shift_var) or 0.0
+            unshifted_seq = compute_phase_bins(named_seq, shift=0.0)
+            phased_seq = compute_phase_bins(named_seq, shift=shift)
+            cyc_seq_map = make_cycle_seq_map(phased_seq)
+            details_payload = self._parse_experimental_details_payload(
+                self._header_info.get("experimentalDetails", "")
+            )
+            if isinstance(details_payload, dict):
+                valve_names = self._effective_valve_names(valve_names, details_payload)
+                named_seq = apply_valve_names(self._seq_dict, valve_names)
+                unshifted_seq = compute_phase_bins(named_seq, shift=0.0)
+                phased_seq = compute_phase_bins(named_seq, shift=shift)
+                cyc_seq_map = make_cycle_seq_map(phased_seq)
 
-        fig = draw_cycle_figure(
-            cycle,
-            c["filename"],
-            segs,
-            c["phase_color_map"],
-            c["all_phase_names"],
-            c["xlim_val"],
-            c["ylim_val"],
-            grid_x=c["grid_x"],
-            grid_y=c["grid_y"],
-            grid_x_spacing=c["grid_x_spacing"],
-            grid_y_spacing=c["grid_y_spacing"],
-            sequence_note=self._sequence_note_text(c["cyc_seq_map"].get(cycle, ""), c["phased_seq"], details_payload),
-            figsize=(10, 7),
-        )
+            self._log(f"Preview: reading cycle {cycle}...")
 
-        cycles_sorted = sorted(c["cycle_points"].keys())
-        self._open_preview_window(fig, cycle, cycles_sorted,
-                                  c["filename"])
+            def _prog(bytes_read, file_size):
+                self._set_progress(bytes_read / file_size * 85)
+
+            cycle_points, cycle_start_map = stream_pressure(
+                path,
+                wait_time=wait_time,
+                progress_cb=_prog,
+                target_cycle=cycle,
+            )
+            if cycle not in cycle_points:
+                self._log(f"ERROR: Cycle {cycle} not found in the raw data.")
+                return
+
+            cycle_points, baseline = subtract_baseline(cycle_points)
+            max_ct, max_p = compute_axis_limits(cycle_points, cycle_start_map)
+            xlim_val = xlim if xlim else max_ct
+            ylim_val = ylim if ylim else max_p
+            all_phase_names = []
+            for sequence_data in phased_seq.values():
+                for phase_name in sequence_data.get("phase_names", []):
+                    if phase_name not in all_phase_names:
+                        all_phase_names.append(phase_name)
+            phase_color_map = build_phase_color_map(all_phase_names)
+            filename = Path(path).stem
+            if filename.endswith("_condensed"):
+                filename = filename[:-len("_condensed")]
+
+            segs = build_segments(
+                cycle, cycle_points, cycle_start_map,
+                phased_seq, cyc_seq_map, assign_phase,
+            )
+            leakrate_regressions = compute_leakrate_regressions(
+                cycle, cycle_points, cycle_start_map,
+                phased_seq, cyc_seq_map, assign_phase,
+                leakrate_phase_reduction,
+            )
+            fig = draw_cycle_figure(
+                cycle, filename, segs, phase_color_map, all_phase_names,
+                xlim_val, ylim_val,
+                grid_x=grid_x, grid_y=grid_y,
+                grid_x_spacing=grid_x_spacing,
+                grid_y_spacing=grid_y_spacing,
+                phase_background=unshifted_seq.get(
+                    cyc_seq_map.get(cycle), {}
+                ),
+                leakrate_regressions=leakrate_regressions,
+                sequence_note=self._sequence_note_text(
+                    cyc_seq_map.get(cycle, ""), phased_seq, details_payload,
+                ),
+                figsize=(10, 7),
+            )
+            self._set_progress(100)
+            self.after(0, lambda: self._open_preview_window(fig, cycle, [cycle], filename))
+            self._log(f"Preview ready: cycle {cycle} ({len(cycle_points[cycle]):,} points, baseline {baseline:.2f} mTorr).")
+        except Exception as exc:
+            self._log(f"Preview ERROR: {exc}")
+        finally:
+            def _re_enable():
+                self._process_btn.config(state="normal")
+                self._preview_btn.config(state="normal")
+            self.after(0, _re_enable)
 
     def _open_preview_window(self, fig, cycle: int,
                              cycles_sorted: list, filename: str):

@@ -1,11 +1,96 @@
-GUID: {CC576A6F-046F-4229-9645-B079FD48A0F9}
-Jay_Chamber200_TMA25_LeakRateNaN
-{"Info":"TMA dose pressure dropped super low. I may have left it closed when I moved it on the VCR line. Dose test TMA to see if it just needs a longer dose","WaitTime":0,"EDR":NaN,"DID":[NaN],"ValvePrecursor":[NaN,7,4,3,10,11],"Name":["Chamber","GV","TMA","H2O","LeakRate","Purge"],"TempC":[200,60,25,25,NaN,NaN],"ProcessTimeHr":0.075,"EndTime":"2026-09-05 18:10:10","SequenceNotes":[{"Seq":1,"Cycles":1,"Note":"The base pressure and leak rate still appear quite high, although only 12 cycles of alumina were completed before I noticed the low dose pressure"}]}
-Valve Sequence:
-1	10	60	0	0	0	120	0	10
-1	4	4	0	0	1	10	0	10
-1	4	4	0	0	2	10	0	10
-1	4	4	0	0	5	10	0	10
-
-Start Date/Time2026-09-05T18:06:56.053 (PST/PDT)
-Time Elapsed:283
+{
+  "GUID": "{311933B7-15B1-4847-998F-5451BC9886D5}",
+  "username": "Jay_Chamber100_GV60_TDIC25_DAMDPA25_LeakRateNaN",
+  "experimentalDetails": {
+    "Info": "There is a leak and I also left the TMA valve closed. I am going to run a TDIC DAMDPA  recipe for shits and giggles. TDIC ED has historically been good at reducing the leak rate, so maybe this will too. This also gives me a chance to see how this recipe is going. Hopefully it reduces it enough that I don t have to disassemble the reactor tomorrow",
+    "WaitTime": 7200,
+    "EDR": NaN,
+    "DID": [
+      NaN
+    ],
+    "ValvePrecursor": [
+      NaN,
+      7,
+      5,
+      8,
+      6,
+      12
+    ],
+    "Name": [
+      "Chamber",
+      "GV",
+      "TDIC",
+      "DAMDPA",
+      "MeI",
+      "LeakRate"
+    ],
+    "TempC": [
+      100,
+      60,
+      25,
+      25,
+      25,
+      NaN
+    ],
+    "ProcessTimeHr": 12.966667,
+    "EndTime": "2026-09-06 11:14:34"
+  },
+  "startTime": "2026-09-05T20:20:01.160 (PST/PDT)",
+  "valveSequence": [
+    [
+      1,
+      7,
+      0,
+      15,
+      0,
+      0,
+      0,
+      0,
+      10
+    ],
+    [
+      35,
+      5,
+      4,
+      0,
+      0,
+      300,
+      0,
+      0,
+      300
+    ],
+    [
+      0,
+      8,
+      4,
+      0,
+      0,
+      300,
+      0,
+      0,
+      300
+    ],
+    [
+      0,
+      12,
+      30,
+      0,
+      0,
+      0,
+      60,
+      0,
+      10
+    ],
+    [
+      0,
+      7,
+      0,
+      15,
+      0,
+      0,
+      0,
+      0,
+      10
+    ]
+  ]
+}

@@ -85,6 +85,7 @@ def stream_pressure(
     path:        str | Path,
     wait_time:   float = 0.0,
     progress_cb = None,
+    target_cycle: int | None = None,
 ) -> tuple[dict, dict]:
     """
     Stream-parse *path* and return pressure data grouped by cycle.
@@ -98,14 +99,17 @@ def stream_pressure(
     progress_cb : callable(bytes_read, file_size) or None
         Optional callback invoked periodically so the caller can update a
         progress indicator.  Called roughly every 4 MB of input.
+    target_cycle : int or None
+        If provided, retain only this explicitly-labelled cycle.  Raw files
+        are ordered by cycle, so parsing stops when a later cycle is reached.
 
     Returns
     -------
     cycle_points : dict[int, list[tuple[float, float]]]
         ``{cycle: [(t_s, pressure), ...]}`` — unsorted within each cycle.
     cycle_start_map : dict[int, float]
-        ``{cycle: t0_s}`` — absolute time (s) of the first pressure point
-        in each cycle.
+        ``{cycle: t0_s}`` — absolute time (s) of the first retained pressure
+        point in each cycle, after ``wait_time`` filtering.
     """
     path      = Path(path)
     file_size = max(path.stat().st_size, 1)
@@ -127,14 +131,17 @@ def stream_pressure(
                 pl    = _parse_payload(obj.get("payload", {}))
                 t_s   = float(pl["TimeElapsed"]) / 1000.0
                 cycle = int(pl["CurrentCycle"])
-                if cycle >= 1 and cycle not in cycle_start_map:
-                    cycle_start_map[cycle] = t_s
                 if t_s < wait_time:
                     continue
+                if target_cycle is not None and cycle > target_cycle:
+                    break
+                if cycle >= 1 and cycle not in cycle_start_map:
+                    cycle_start_map[cycle] = t_s
                 pval  = float(pl["Pressure"])
                 if cycle < 1:
                     continue
-                cycle_points.setdefault(cycle, []).append((t_s, pval))
+                if target_cycle is None or cycle == target_cycle:
+                    cycle_points.setdefault(cycle, []).append((t_s, pval))
             except Exception:
                 pass
 
