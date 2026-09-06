@@ -458,13 +458,15 @@ class ReactorApp(tk.Tk):
                 if not note_text:
                     continue
                 seq_value = entry.get("Seq", entry.get("Sequence"))
+                has_sequence = False
                 if seq_value not in (None, ""):
                     try:
                         notes_by_seq.setdefault(int(seq_value), []).append(note_text)
+                        has_sequence = True
                     except (TypeError, ValueError):
                         pass
                 cycle_value = entry.get("Cycles")
-                if cycle_value not in (None, ""):
+                if not has_sequence and cycle_value not in (None, ""):
                     try:
                         notes_by_cycles.setdefault(int(cycle_value), []).append(note_text)
                     except (TypeError, ValueError):
@@ -587,11 +589,8 @@ class ReactorApp(tk.Tk):
     def _recipe_valve_name_payload(self, valve_names: dict) -> dict:
         used_valves: set[int] = set()
         for seq_data in self._seq_dict.values():
-            for key in seq_data:
-                if key.startswith("valve"):
-                    match = re.search(r"\d+", key)
-                    if match:
-                        used_valves.add(int(match.group()))
+            for vnum, _ in seq_data.get("valve_rows", []):
+                used_valves.add(vnum)
 
         payload = {}
         for vnum in sorted(used_valves):
@@ -686,14 +685,16 @@ class ReactorApp(tk.Tk):
                 continue
 
             seq_value = entry.get("Seq", entry.get("Sequence"))
+            has_sequence = False
             if seq_value not in (None, ""):
                 try:
                     notes_by_seq[int(seq_value)] = note_text
+                    has_sequence = True
                 except (TypeError, ValueError):
                     pass
 
             cycle_value = entry.get("Cycles")
-            if cycle_value not in (None, ""):
+            if not has_sequence and cycle_value not in (None, ""):
                 try:
                     notes_by_cycles[int(cycle_value)] = note_text
                 except (TypeError, ValueError):
@@ -725,14 +726,9 @@ class ReactorApp(tk.Tk):
         for seq_key, seq_data in seq_dict.items():
             cycles = seq_data.get("cycles", "")
             lines.append(f"  {seq_key} (cycles: {cycles})")
-            for key, value in seq_data.items():
-                if key == "cycles":
-                    continue
-                if isinstance(value, (list, tuple)):
-                    value_text = json.dumps(list(value), ensure_ascii=False)
-                else:
-                    value_text = str(value)
-                lines.append(f"    {key}: {value_text}")
+            for vnum, timing in seq_data.get("valve_rows", []):
+                value_text = json.dumps(list(timing), ensure_ascii=False)
+                lines.append(f"    valve{vnum}: {value_text}")
         return "\n".join(lines)
 
     def _load_settings_state(self):
@@ -1189,8 +1185,13 @@ class ReactorApp(tk.Tk):
         self._log(f"Loading:  {path}")
         self._log(self._format_timing_table(self._seq_dict))
         for sk, sd in self._seq_dict.items():
-            valves = [k for k in sd if k.startswith("valve")]
-            self._log(f"  {sk}: {sd['cycles']} cycles -- {', '.join(valves)}")
+            seen_v: list[str] = []
+            seen_set: set[int] = set()
+            for vnum, _ in sd.get("valve_rows", []):
+                if vnum not in seen_set:
+                    seen_set.add(vnum)
+                    seen_v.append(f"valve{vnum}")
+            self._log(f"  {sk}: {sd['cycles']} cycles -- {', '.join(seen_v)}")
         details_text = self._format_header_details(self._header_info.get("experimentalDetails", ""))
         if details_text:
             self._log(f"Details:\n{details_text}")
@@ -1251,15 +1252,11 @@ class ReactorApp(tk.Tk):
         # Collect unique valve numbers across all sequences.
         rows: list = []
         seen: set  = set()
-        for seq_key, seq_data in self._seq_dict.items():
-            for k in seq_data:
-                if k.startswith("valve"):
-                    m = re.search(r"\d+", k)
-                    if m:
-                        vnum = int(m.group())
-                        if vnum not in seen:
-                            seen.add(vnum)
-                            rows.append(vnum)
+        for seq_data in self._seq_dict.values():
+            for vnum, _ in seq_data.get("valve_rows", []):
+                if vnum not in seen:
+                    seen.add(vnum)
+                    rows.append(vnum)
 
         if not rows:
             ttk.Label(self._valve_frame, text="No valves found.").pack()

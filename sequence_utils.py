@@ -22,25 +22,19 @@ PHASE_TYPES = ["prepump", "dosepump", "dosen2", "dose", "hold", "prepurge", "pur
 def convert_sequence(valve_sequence: list) -> dict:
     """
     Convert the raw list-of-lists ``valveSequence`` from the JSON header into
-    a structured dict.
-
-    Input
-    -----
-    [[cycles, valve_num, t0, t1, t2, t3, t4, t5, t6],
-     [0,      valve_num2, t0, ...],   # 0 in position 0 = additional valve
-     ...]
+    a structured dict.  Multiple rows with the same valve number within one
+    sequence are preserved in insertion order via ``valve_rows``.
 
     Output
     ------
     {
-        "seq1": {"cycles": N, "valve7": [t0..t6]},
-        "seq2": {"cycles": M, "valve5": [t0..t6], "valve6": [t0..t6]},
+        "seq1": {"cycles": N, "valve_rows": [(valve_num_int, [t0..t6]), ...]},
         ...
     }
     """
     result: dict = {}
     seq_count = 1
-    current_seq: dict = {}
+    current_seq: dict | None = None
 
     for row in valve_sequence:
         if not any(row):
@@ -51,16 +45,15 @@ def convert_sequence(valve_sequence: list) -> dict:
         timing      = timing_vals + [0] * (len(PHASE_TYPES) - len(timing_vals))
 
         if cycle_count == 0:
-            # Additional valve appended to the current sequence
-            current_seq[f"valve{valve_num}"] = timing
+            if current_seq is not None:
+                current_seq["valve_rows"].append((valve_num, timing))
         else:
-            # New sequence begins
-            if current_seq:
+            if current_seq is not None:
                 result[f"seq{seq_count}"] = current_seq
                 seq_count += 1
-            current_seq = {"cycles": cycle_count, f"valve{valve_num}": timing}
+            current_seq = {"cycles": cycle_count, "valve_rows": [(valve_num, timing)]}
 
-    if current_seq:
+    if current_seq is not None:
         result[f"seq{seq_count}"] = current_seq
 
     return result
@@ -68,26 +61,16 @@ def convert_sequence(valve_sequence: list) -> dict:
 
 def apply_valve_names(seq_dict: dict, valve_names: dict) -> dict:
     """
-    Return a deep copy of *seq_dict* with valve keys renamed using
-    *valve_names* = ``{valve_number_int: display_string}``.
-
-    Example: ``"valve7"`` -> ``"valveTDIC"``  when  ``valve_names = {7: "TDIC"}``
+    Return a deep copy of *seq_dict* with valve numbers in ``valve_rows``
+    replaced by display strings from *valve_names*.
     """
     renamed = {}
     for seq_key, seq_data in seq_dict.items():
-        new_seq = {}
-        for k, v in seq_data.items():
-            if k.startswith("valve"):
-                m = re.search(r"\d+", k)
-                if m:
-                    vnum  = int(m.group())
-                    label = valve_names.get(vnum, str(vnum))
-                    new_seq[f"valve{label}"] = copy.copy(v)
-                else:
-                    new_seq[k] = copy.copy(v)
-            else:
-                new_seq[k] = v
-        renamed[seq_key] = new_seq
+        new_rows = [
+            (valve_names.get(vnum, str(vnum)), copy.copy(timing))
+            for vnum, timing in seq_data.get("valve_rows", [])
+        ]
+        renamed[seq_key] = {"cycles": seq_data["cycles"], "valve_rows": new_rows}
     return renamed
 
 
@@ -108,13 +91,25 @@ def compute_phase_bins(seq_dict: dict, shift: float = 0.0) -> dict:
         compact_vals: list = []
         all_names:    list = []
 
-        for k, v in seq_data.items():
-            if k == "cycles":
-                continue
-            display = k[len("valve"):]    # strip "valve" prefix -> "TDIC", "7", …
-            for phase_type in PHASE_TYPES:
-                all_names.append(f"{seq_key}_{display}_{phase_type}")
-            compact_vals.extend(v)
+        for display, timing in seq_data.get("valve_rows", []):
+            display = str(display)
+            # A row with no dosing phases but a nonzero hold is a leak-rate step;
+            # rename its hold slot so it gets a distinct phase label.
+            vals = [float(v) for v in timing]
+            is_lr = (
+                len(vals) >= 5
+                and abs(vals[1]) <= 1e-12   # dosepump
+                and abs(vals[2]) <= 1e-12   # dosen2
+                and abs(vals[3]) <= 1e-12   # dose
+                and abs(vals[4]) > 1e-12    # hold
+            )
+            lr_display = f"{display}_LR" if is_lr else display
+            for i, phase_type in enumerate(PHASE_TYPES):
+                if is_lr and phase_type == "hold":
+                    all_names.append(f"{seq_key}_{lr_display}_LeakRate")
+                else:
+                    all_names.append(f"{seq_key}_{lr_display}_{phase_type}")
+            compact_vals.extend(timing)
 
         phase_bins:  list = [0.0]
         phase_names: list = []

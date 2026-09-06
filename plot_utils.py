@@ -242,14 +242,20 @@ def compute_exposure_table(
 
     nominal_map: dict = {}
     for seq_key, seq_data in phased_seq.items():
-        for key, timing in seq_data.items():
-            if not str(key).startswith("valve"):
-                continue
-            vals = list(timing) if isinstance(timing, (list, tuple)) else []
-            dose = float(vals[3]) if len(vals) > 3 else 0.0
-            hold = float(vals[4]) if len(vals) > 4 else 0.0
-            label = str(key)[len("valve"):]
-            nominal_map[f"{seq_key}_{label}"] = {
+        for display, timing in seq_data.get("valve_rows", []):
+            display = str(display)
+            vals = [float(v) for v in timing] if isinstance(timing, (list, tuple)) else []
+            is_lr = (
+                len(vals) >= 5
+                and abs(vals[1]) <= 1e-12
+                and abs(vals[2]) <= 1e-12
+                and abs(vals[3]) <= 1e-12
+                and abs(vals[4]) > 1e-12
+            )
+            col_display = f"{display}_LR" if is_lr else display
+            dose = vals[3] if len(vals) > 3 else 0.0
+            hold = vals[4] if len(vals) > 4 else 0.0
+            nominal_map[f"{seq_key}_{col_display}"] = {
                 "nominal_dose": dose,
                 "nominal_hold": hold,
                 "nominal_duration": dose + hold,
@@ -262,13 +268,6 @@ def compute_exposure_table(
             return float(value)
         except (TypeError, ValueError):
             return 0.0
-
-    def _is_leakrate_step(timing):
-        vals = [_to_float(value) for value in timing]
-        if len(vals) < 5:
-            return False
-        dose_total = vals[1] + vals[2] + vals[3]
-        return abs(dose_total) <= 1e-12 and abs(vals[4]) > 1e-12
 
     def _least_squares_slope(times, pressures):
         n = len(times)
@@ -297,7 +296,7 @@ def compute_exposure_table(
             if len(parts) != 2:
                 continue
             phase_head, phase_tail = parts
-            if phase_tail not in {"dose", "hold"}:
+            if phase_tail not in {"dose", "hold", "LeakRate"}:
                 continue
             if len(times) < 2:
                 continue
@@ -339,27 +338,22 @@ def compute_exposure_table(
             row[f"{col}_exposure"] = round(total_exposure, 4)
             row[f"{col}_mean_pressure"] = round(mean_p, 4)
 
-            if _is_leakrate_step(vals):
-                exposure_points = []
-                for tail in ("dose", "hold"):
-                    seg = segs.get(f"{phase_head}_{tail}")
-                    if not seg:
-                        continue
-                    times_part, pressures_part = seg
-                    exposure_points.extend(zip(times_part, pressures_part))
-
-                if len(exposure_points) >= 2:
-                    exposure_points.sort(key=lambda tp: tp[0])
-                    t_start = exposure_points[0][0] + phase_reduction
-                    t_end = exposure_points[-1][0] - phase_reduction
-                    trimmed = [tp for tp in exposure_points if t_start <= tp[0] <= t_end]
-
-                    if len(trimmed) >= 2:
-                        times = [t for t, _ in trimmed]
-                        pressures = [p for _, p in trimmed]
-                        leak_slope = _least_squares_slope(times, pressures)
-                        if leak_slope is not None:
-                            row[f"{col}_leak_rate"] = round(leak_slope, 6)
+            # Leak rate: present when the phase_head has a dedicated LeakRate segment.
+            leakrate_seg = segs.get(f"{phase_head}_LeakRate")
+            if leakrate_seg and len(leakrate_seg[0]) >= 2:
+                times_lr, pressures_lr = leakrate_seg
+                t_start = times_lr[0] + phase_reduction
+                t_end   = times_lr[-1] - phase_reduction
+                trimmed = [
+                    (t, p) for t, p in zip(times_lr, pressures_lr)
+                    if t_start <= t <= t_end
+                ]
+                if len(trimmed) >= 2:
+                    t_trim = [t for t, _ in trimmed]
+                    p_trim = [p for _, p in trimmed]
+                    leak_slope = _least_squares_slope(t_trim, p_trim)
+                    if leak_slope is not None:
+                        row[f"{col}_leak_rate"] = round(leak_slope, 6)
 
             has_nonzero_exposure = True
 
