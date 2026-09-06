@@ -73,6 +73,10 @@ class ReactorApp(tk.Tk):
         self._output_dir        = tk.StringVar()
         self._xlim_var          = tk.StringVar()
         self._ylim_var          = tk.StringVar()
+        self._grid_x_var        = tk.BooleanVar(value=True)
+        self._grid_y_var        = tk.BooleanVar(value=True)
+        self._grid_x_spacing_var = tk.StringVar()
+        self._grid_y_spacing_var = tk.StringVar()
         self._shift_var         = tk.StringVar()
         self._wait_var          = tk.StringVar()
         self._fps_var           = tk.StringVar()
@@ -193,9 +197,27 @@ class ReactorApp(tk.Tk):
                 self._wait_entry = entry
         ttk.Checkbutton(
             plot_frame,
+            text="X gridlines",
+            variable=self._grid_x_var,
+        ).grid(row=6, column=0, sticky="w", padx=3, pady=(6, 0))
+        ttk.Checkbutton(
+            plot_frame,
+            text="Y gridlines",
+            variable=self._grid_y_var,
+        ).grid(row=6, column=2, sticky="w", padx=3, pady=(6, 0))
+        ttk.Label(plot_frame, text="X grid spacing:").grid(
+            row=7, column=0, sticky="w", padx=3, pady=(3, 0))
+        ttk.Entry(plot_frame, textvariable=self._grid_x_spacing_var, width=8).grid(
+            row=7, column=1, padx=3, pady=(3, 0))
+        ttk.Label(plot_frame, text="Y grid spacing:").grid(
+            row=8, column=0, sticky="w", padx=3, pady=(3, 0))
+        ttk.Entry(plot_frame, textvariable=self._grid_y_spacing_var, width=8).grid(
+            row=8, column=1, padx=3, pady=(3, 0))
+        ttk.Checkbutton(
+            plot_frame,
             text="Write condensed data JSON",
             variable=self._write_condensed_json_var,
-        ).grid(row=6, column=0, columnspan=3, sticky="w", padx=3, pady=(6, 0))
+        ).grid(row=9, column=0, columnspan=3, sticky="w", padx=3, pady=(6, 0))
 
         # -- Process button + progress bar -------------------------------------
         ctrl = ttk.Frame(parent)
@@ -851,6 +873,11 @@ class ReactorApp(tk.Tk):
 
         xlim = last.get("xlim")
         ylim = last.get("ylim")
+        grid_x = last.get("grid_x")
+        grid_y = last.get("grid_y")
+        legacy_grid_spacing = last.get("grid_spacing")
+        grid_x_spacing = last.get("grid_x_spacing", legacy_grid_spacing)
+        grid_y_spacing = last.get("grid_y_spacing", legacy_grid_spacing)
         shift = last.get("shift")
         wait_time = last.get("wait_time")
         fps = last.get("fps")
@@ -862,6 +889,14 @@ class ReactorApp(tk.Tk):
             self._xlim_var.set(str(xlim))
         if ylim is not None:
             self._ylim_var.set(str(ylim))
+        if grid_x is not None:
+            self._grid_x_var.set(bool(grid_x))
+        if grid_y is not None:
+            self._grid_y_var.set(bool(grid_y))
+        if grid_x_spacing is not None:
+            self._grid_x_spacing_var.set(str(grid_x_spacing))
+        if grid_y_spacing is not None:
+            self._grid_y_spacing_var.set(str(grid_y_spacing))
         if shift is not None:
             self._shift_var.set(str(shift))
         if wait_time is not None:
@@ -899,6 +934,10 @@ class ReactorApp(tk.Tk):
         self._settings_state["last_processing_settings"] = {
             "xlim": self._xlim_var.get().strip(),
             "ylim": self._ylim_var.get().strip(),
+            "grid_x": self._grid_x_var.get(),
+            "grid_y": self._grid_y_var.get(),
+            "grid_x_spacing": self._grid_x_spacing_var.get().strip(),
+            "grid_y_spacing": self._grid_y_spacing_var.get().strip(),
             "shift": self._shift_var.get().strip(),
             "wait_time": self._wait_var.get().strip(),
             "fps": self._fps_var.get().strip(),
@@ -1302,6 +1341,14 @@ class ReactorApp(tk.Tk):
         valve_names = {vnum: var.get() for vnum, var in self._valve_name_vars.items()}
         xlim        = self._get_float(self._xlim_var)
         ylim        = self._get_float(self._ylim_var)
+        grid_x_spacing = self._get_float(self._grid_x_spacing_var)
+        grid_y_spacing = self._get_float(self._grid_y_spacing_var)
+        if grid_x_spacing is not None and grid_x_spacing <= 0:
+            self._log("ERROR: X grid spacing must be greater than zero.")
+            return
+        if grid_y_spacing is not None and grid_y_spacing <= 0:
+            self._log("ERROR: Y grid spacing must be greater than zero.")
+            return
         shift       = self._get_float(self._shift_var)
         wait_time   = self._get_float(self._wait_var)
         leakrate_phase_reduction = max(
@@ -1324,6 +1371,10 @@ class ReactorApp(tk.Tk):
                 valve_names,
                 xlim,
                 ylim,
+                self._grid_x_var.get(),
+                self._grid_y_var.get(),
+                grid_x_spacing,
+                grid_y_spacing,
                 shift,
                 wait_time,
                 leakrate_phase_reduction,
@@ -1339,6 +1390,10 @@ class ReactorApp(tk.Tk):
         valve_names,
         xlim,
         ylim,
+        grid_x,
+        grid_y,
+        grid_x_spacing,
+        grid_y_spacing,
         shift,
         wait_time,
         leakrate_phase_reduction,
@@ -1481,6 +1536,9 @@ class ReactorApp(tk.Tk):
                 fig = draw_cycle_figure(
                     cycle, filename, segs, phase_color_map,
                     all_phase_names, xlim_val, ylim_val,
+                    grid_x=grid_x, grid_y=grid_y,
+                    grid_x_spacing=grid_x_spacing,
+                    grid_y_spacing=grid_y_spacing,
                     sequence_note=self._sequence_note_text(seq_key, phased_seq, details_payload),
                 )
 
@@ -1579,6 +1637,10 @@ class ReactorApp(tk.Tk):
                 phase_color_map = phase_color_map,
                 xlim_val        = xlim_val,
                 ylim_val        = ylim_val,
+                grid_x           = grid_x,
+                grid_y           = grid_y,
+                grid_x_spacing   = grid_x_spacing,
+                grid_y_spacing   = grid_y_spacing,
                 filename        = filename,
                 out_dir         = out_dir,
                 experimental_details = details_payload,
@@ -1714,6 +1776,10 @@ class ReactorApp(tk.Tk):
             c["all_phase_names"],
             c["xlim_val"],
             c["ylim_val"],
+            grid_x=c["grid_x"],
+            grid_y=c["grid_y"],
+            grid_x_spacing=c["grid_x_spacing"],
+            grid_y_spacing=c["grid_y_spacing"],
             sequence_note=self._sequence_note_text(c["cyc_seq_map"].get(cycle, ""), c["phased_seq"], details_payload),
             figsize=(10, 7),
         )

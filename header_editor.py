@@ -154,6 +154,12 @@ def _extract_details(payload: dict):
         text = details.strip()
         if not text:
             return False, ""
+        try:
+            parsed = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            return False, text
+        if isinstance(parsed, dict):
+            return True, parsed
         return False, text
     return False, details
 
@@ -209,6 +215,8 @@ class HeaderEditorDialog(tk.Toplevel):
 
         self._build_ui()
         self._populate_from_payload()
+        self._saved_editor_state = self._editor_state()
+        self.bind("<KeyRelease>", lambda _event: self._update_unsaved_warning())
 
         self.protocol("WM_DELETE_WINDOW", self._on_cancel)
         self.bind("<Escape>", lambda _event: self._on_cancel())
@@ -263,6 +271,13 @@ class HeaderEditorDialog(tk.Toplevel):
 
         button_row = ttk.Frame(outer)
         button_row.pack(fill="x", pady=(8, 0))
+        self._unsaved_warning = tk.Label(
+            button_row,
+            text="",
+            foreground="red",
+            anchor="w",
+        )
+        self._unsaved_warning.pack(side="left")
         ttk.Button(button_row, text="Save", command=self._on_save).pack(side="right", padx=(6, 0))
         ttk.Button(button_row, text="Cancel", command=self._on_cancel).pack(side="right")
 
@@ -273,8 +288,23 @@ class HeaderEditorDialog(tk.Toplevel):
         ttk.Label(form, text="Info").grid(row=0, column=0, sticky="nw", padx=(0, 6), pady=3)
         self._field_widgets["Info"] = tk.Text(form, height=5, width=72, wrap="word")
         self._field_widgets["Info"].grid(row=0, column=1, columnspan=3, sticky="ew", pady=3)
+        self._save_details_as_json_var = tk.BooleanVar(value=self._details_structured)
+        ttk.Checkbutton(
+            form,
+            text="Save experimental details as JSON",
+            variable=self._save_details_as_json_var,
+            command=self._update_unsaved_warning,
+        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(3, 0))
+        self._details_format_warning = tk.Label(
+            form,
+            text="",
+            foreground="red",
+            anchor="w",
+            justify="left",
+        )
+        self._details_format_warning.grid(row=2, column=0, columnspan=4, sticky="w", pady=(0, 3))
 
-        row = 1
+        row = 3
         for left_label, left_key, left_kind, right_label, right_key, right_kind in [
             ("Wait time", "WaitTime", "entry", "EDR", "EDR", "checkbox"),
             ("DID", "DID", "entry", "SID", "SID", "entry"),
@@ -301,6 +331,7 @@ class HeaderEditorDialog(tk.Toplevel):
 
         form.columnconfigure(1, weight=1)
         form.columnconfigure(3, weight=1)
+        self._update_details_format_warning()
 
         table_frame = ttk.LabelFrame(parent, text="Valve Metadata", padding=8)
         table_frame.pack(fill="x", pady=(8, 0))
@@ -315,6 +346,9 @@ class HeaderEditorDialog(tk.Toplevel):
         toolbar.pack(fill="x", pady=(0, 6))
         ttk.Button(toolbar, text="Add Row", command=self._add_table_row).pack(side="left")
         ttk.Button(toolbar, text="Reset Rows", command=self._reset_table_rows).pack(side="left", padx=(6, 0))
+        ttk.Button(toolbar, text="Remove Empty Rows", command=self._remove_empty_rows).pack(
+            side="left", padx=(6, 0)
+        )
 
         self._table_scroll = _ScrollableFrame(parent)
         self._table_scroll.pack(fill="both", expand=True)
@@ -414,6 +448,40 @@ class HeaderEditorDialog(tk.Toplevel):
         self._populate_details_fields()
         self._reset_table_rows()
 
+    def _update_details_format_warning(self):
+        if self._details_structured and not self._save_details_as_json_var.get():
+            self._details_format_warning.configure(
+                text="Warning: saving as plain text will discard structured experimental details other than Info."
+            )
+        else:
+            self._details_format_warning.configure(text="")
+
+    def _editor_state(self):
+        details = self._build_details_payload()
+        if not self._save_details_as_json_var.get():
+            details = details.get("Info", "")
+        return json.dumps(
+            {
+                "username": self._username_var.get().strip(),
+                "experimentalDetails": details,
+                "valveSequence": self._collect_table_rows(),
+                "saveDetailsAsJson": self._save_details_as_json_var.get(),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+
+    def _update_unsaved_warning(self):
+        if not hasattr(self, "_saved_editor_state"):
+            self._update_details_format_warning()
+            return
+        if self._editor_state() != self._saved_editor_state:
+            self._unsaved_warning.configure(text="Unsaved changes")
+        else:
+            self._unsaved_warning.configure(text="")
+        self._update_details_format_warning()
+
     def _select_timing_row(self, index: int):
         self._selected_table_row = index
 
@@ -448,6 +516,7 @@ class HeaderEditorDialog(tk.Toplevel):
             current_rows.insert(insert_at, row_values[:len(TIMING_COLUMNS)])
             self._rebuild_timing_rows(current_rows)
             self._selected_table_row = insert_at
+            self._update_unsaved_warning()
             return
 
         row_index = len(self._table_rows) if insert_index is None else insert_index
@@ -493,6 +562,7 @@ class HeaderEditorDialog(tk.Toplevel):
         del current_rows[index]
         self._rebuild_timing_rows(current_rows)
         self._selected_table_row = min(index, len(self._table_rows) - 1) if self._table_rows else None
+        self._update_unsaved_warning()
 
     def _reflow_table_rows(self):
         for idx, row in enumerate(self._table_rows):
@@ -504,6 +574,24 @@ class HeaderEditorDialog(tk.Toplevel):
         rows = self._table_original if self._table_original else []
         self._selected_table_row = None
         self._rebuild_timing_rows(rows)
+        self._update_unsaved_warning()
+
+    def _remove_empty_rows(self):
+        def is_zero_row(row):
+            if len(row) != len(TIMING_COLUMNS):
+                return False
+            try:
+                return all(value.strip() and float(value) == 0.0 for value in row)
+            except (AttributeError, TypeError, ValueError):
+                return False
+
+        rows = [
+            [var.get() for var in row["vars"]]
+            for row in self._table_rows
+        ]
+        self._rebuild_timing_rows([row for row in rows if not is_zero_row(row)])
+        self._selected_table_row = None
+        self._update_unsaved_warning()
 
     def _collect_table_rows(self) -> list[list]:
         rows: list[list] = []
@@ -538,9 +626,13 @@ class HeaderEditorDialog(tk.Toplevel):
     def _on_save(self):
         payload = copy.deepcopy(self._payload)
         payload["username"] = self._username_var.get().strip()
-        payload["experimentalDetails"] = self._build_details_payload()
+        details = self._build_details_payload()
+        payload["experimentalDetails"] = (
+            details if self._save_details_as_json_var.get() else details.get("Info", "")
+        )
         payload["valveSequence"] = self._collect_table_rows()
         self.result = payload
+        self._saved_editor_state = self._editor_state()
         self.destroy()
 
     def _on_cancel(self):

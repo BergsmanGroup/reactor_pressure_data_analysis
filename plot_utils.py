@@ -27,6 +27,7 @@ compute_axis_limits(cycle_points, cycle_start_map) -> (max_cycle_time, max_press
 import os
 import textwrap
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MultipleLocator
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +110,10 @@ def draw_cycle_figure(
     xlim:            float,
     ylim:            float,
     sequence_note:   str | None = None,
+    grid_x:          bool = True,
+    grid_y:          bool = True,
+    grid_x_spacing:  float | None = None,
+    grid_y_spacing:  float | None = None,
     figsize:         tuple = (10, 8),
 ) -> plt.Figure:
     """
@@ -137,7 +142,18 @@ def draw_cycle_figure(
     ax.set_title(f"{filename} cycle {cycle}", fontsize=12)
     ax.set_xlim(0, xlim)
     ax.set_ylim(0, ylim)
-    ax.grid(True, alpha=0.35, linewidth=0.6)
+    if grid_x and grid_x_spacing is not None:
+        ax.xaxis.set_major_locator(MultipleLocator(grid_x_spacing))
+    if grid_y and grid_y_spacing is not None:
+        ax.yaxis.set_major_locator(MultipleLocator(grid_y_spacing))
+    if grid_x:
+        ax.grid(True, axis="x", alpha=0.35, linewidth=0.6)
+    else:
+        ax.grid(False, axis="x")
+    if grid_y:
+        ax.grid(True, axis="y", alpha=0.35, linewidth=0.6)
+    else:
+        ax.grid(False, axis="y")
 
     handles, labels = ax.get_legend_handles_labels()
     if handles:
@@ -225,10 +241,10 @@ def compute_exposure_table(
     ``hold`` phases, combined into one integration per sequence/valve label.
 
     If a valve step has zero ``N2Dose + PumpDose + Dose`` and a nonzero
-    ``Hold``, the row also includes ``<valve>_leak_rate`` computed as the
-    least-squares slope dP/dt over that step's dose+hold pressure points after
-    trimming the first and last ``leakrate_phase_reduction`` seconds from the
-    exposure window.
+    ``Hold``, the row also includes ``<valve>_leak_rate`` in mTorr/min,
+    computed from the least-squares slope dP/dt over that step's LeakRate
+    pressure points. The first and last ``leakrate_phase_reduction`` seconds
+    are trimmed from the fit window.
 
     Returns a list of dicts, one row per sequence index (zero-based).
     Each row contains dynamic columns per valve label:
@@ -351,7 +367,8 @@ def compute_exposure_table(
                 if len(trimmed) >= 2:
                     t_trim = [t for t, _ in trimmed]
                     p_trim = [p for _, p in trimmed]
-                    leak_slope = _least_squares_slope(t_trim, p_trim)
+                    # Segment times are seconds; expose leak rate in mTorr/min.
+                    leak_slope = 60.0 * _least_squares_slope(t_trim, p_trim)
                     if leak_slope is not None:
                         row[f"{col}_leak_rate"] = round(leak_slope, 6)
 
