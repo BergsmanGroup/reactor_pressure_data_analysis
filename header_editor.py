@@ -182,7 +182,7 @@ class _ScrollableFrame(ttk.Frame):
 
 
 class HeaderEditorDialog(tk.Toplevel):
-    def __init__(self, parent, payload: dict):
+    def __init__(self, parent, payload: dict, header_text_path: str = ""):
         super().__init__(parent)
         self.title("Edit Header")
         self.transient(parent)
@@ -192,6 +192,7 @@ class HeaderEditorDialog(tk.Toplevel):
 
         self.result: dict | None = None
         self._payload = copy.deepcopy(payload) if isinstance(payload, dict) else {}
+        self._header_text_path = header_text_path
         self._details_structured, self._details_value = _extract_details(self._payload)
         self._username_original = _clean_text(self._payload.get("username", ""))
         self._table_original = _normalize_table(self._payload.get("valveSequence", []))
@@ -264,6 +265,15 @@ class HeaderEditorDialog(tk.Toplevel):
         details_frame.pack(fill="x", pady=(0, 8))
 
         self._build_experimental_details(details_frame)
+
+        self._save_header_text_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            outer,
+            text="Also save changes to the header text file",
+            variable=self._save_header_text_var,
+            state="normal" if self._header_text_path else "disabled",
+            command=self._update_unsaved_warning,
+        ).pack(anchor="w", pady=(0, 8))
 
         table_frame = ttk.LabelFrame(outer, text="Timing Table", padding=8)
         table_frame.pack(fill="both", expand=True)
@@ -466,6 +476,7 @@ class HeaderEditorDialog(tk.Toplevel):
                 "experimentalDetails": details,
                 "valveSequence": self._collect_table_rows(),
                 "saveDetailsAsJson": self._save_details_as_json_var.get(),
+                "saveHeaderText": self._save_header_text_var.get(),
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -632,6 +643,7 @@ class HeaderEditorDialog(tk.Toplevel):
         )
         payload["valveSequence"] = self._collect_table_rows()
         self.result = payload
+        self.result["__save_header_text__"] = self._save_header_text_var.get()
         self._saved_editor_state = self._editor_state()
         self.destroy()
 
@@ -640,7 +652,7 @@ class HeaderEditorDialog(tk.Toplevel):
         self.destroy()
 
 
-def open_header_editor(parent, payload: dict):
-    dialog = HeaderEditorDialog(parent, payload)
+def open_header_editor(parent, payload: dict, header_text_path: str = ""):
+    dialog = HeaderEditorDialog(parent, payload, header_text_path)
     parent.wait_window(dialog)
     return dialog.result

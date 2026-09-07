@@ -56,9 +56,11 @@ from convert_to_json import load_table, build_payload, save_payload, validate_re
 from header_editor import open_header_editor
 from header_text import (
     compare_header_payloads,
+    format_human_json,
     normalized_header_text,
     parse_header_text,
     save_converted_header,
+    save_header_text,
 )
 
 
@@ -604,32 +606,6 @@ class ReactorApp(tk.Tk):
         return "\n".join(lines)
 
     def _format_header_details(self, details_value) -> str:
-        def _format_value(value, level: int = 0) -> str:
-            indent = "  " * level
-            next_indent = "  " * (level + 1)
-
-            if isinstance(value, dict):
-                if not value:
-                    return "{}"
-                lines = ["{"]
-                items = list(value.items())
-                for index, (key, child) in enumerate(items):
-                    rendered = _format_value(child, level + 1)
-                    if "\n" in rendered:
-                        rendered = "\n".join(
-                            f"{next_indent}{line}" if line else line
-                            for line in rendered.splitlines()
-                        )
-                    comma = "," if index < len(items) - 1 else ""
-                    lines.append(f"{next_indent}{json.dumps(key, ensure_ascii=False)}: {rendered}{comma}")
-                lines.append(f"{indent}}}")
-                return "\n".join(lines)
-
-            if isinstance(value, list):
-                return json.dumps(value, ensure_ascii=False)
-
-            return json.dumps(value, ensure_ascii=False)
-
         if isinstance(details_value, str):
             text = details_value.strip()
             if not text:
@@ -638,10 +614,10 @@ class ReactorApp(tk.Tk):
                 parsed = json.loads(text)
             except (TypeError, ValueError):
                 return text
-            return _format_value(parsed)
+            return format_human_json(parsed)
 
         if isinstance(details_value, dict):
-            return _format_value(details_value)
+            return format_human_json(details_value)
 
         return str(details_value)
 
@@ -1468,12 +1444,18 @@ class ReactorApp(tk.Tk):
                 messagebox.showerror("Edit Header", f"Could not load header:\n\n{exc}", parent=self)
                 return
 
-        edited = open_header_editor(self, self._header_info)
+        header_text_path = self._header_txt_path.get().strip()
+        edited = open_header_editor(self, self._header_info, header_text_path)
         if edited is None:
             return
 
+        save_text = bool(edited.pop("__save_header_text__", False))
         try:
             self._rewrite_header_payload(path, edited)
+            if save_text:
+                if not header_text_path or not os.path.isfile(header_text_path):
+                    raise FileNotFoundError("Selected header text file does not exist.")
+                save_header_text(header_text_path, edited)
         except Exception as exc:
             messagebox.showerror("Edit Header", f"Could not save header:\n\n{exc}", parent=self)
             return

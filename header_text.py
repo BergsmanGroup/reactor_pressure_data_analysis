@@ -88,13 +88,97 @@ def converted_json_path(path: str | Path) -> Path:
     return source.with_suffix(".json")
 
 
+def format_human_json(value, level: int = 0) -> str:
+    """Format header JSON with expanded objects and compact list values."""
+    indent = "  " * level
+    child_indent = "  " * (level + 1)
+
+    if isinstance(value, dict):
+        if not value:
+            return "{}"
+        items = list(value.items())
+        lines = ["{"]
+        for index, (key, child) in enumerate(items):
+            rendered = format_human_json(child, level + 1)
+            child_lines = rendered.splitlines()
+            lines.append(
+                f"{child_indent}{json.dumps(key, ensure_ascii=False)}: "
+                + child_lines[0]
+            )
+            lines.extend(child_lines[1:])
+            if index < len(items) - 1:
+                lines[-1] += ","
+        lines.append(f"{indent}}}")
+        return "\n".join(lines)
+
+    if isinstance(value, list):
+        if not value:
+            return "[]"
+        if all(isinstance(item, list) for item in value):
+            lines = ["["]
+            for index, item in enumerate(value):
+                item_text = json.dumps(
+                    item,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    allow_nan=True,
+                )
+                suffix = "," if index < len(value) - 1 else ""
+                lines.append(f"{child_indent}{item_text}{suffix}")
+            lines.append(f"{indent}]")
+            return "\n".join(lines)
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=True,
+        )
+
+    return json.dumps(value, ensure_ascii=False, allow_nan=True)
+
+
 def save_converted_header(path: str | Path, payload: dict) -> Path:
     """Save a parsed header payload beside its source text file."""
     output_path = converted_json_path(path)
     output_path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=True) + "\n",
+        format_human_json(payload) + "\n",
         encoding="utf-8",
     )
+    return output_path
+
+
+def save_header_text(path: str | Path, payload: dict) -> Path:
+    """Write a payload in the legacy human-readable header text structure."""
+    output_path = Path(path)
+    elapsed_line = ""
+    if output_path.exists():
+        for line in output_path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+            if line.startswith("Time Elapsed:"):
+                elapsed_line = line
+                break
+    details = payload.get("experimentalDetails", "")
+    if isinstance(details, (dict, list)):
+        details_text = json.dumps(details, ensure_ascii=False, separators=(",", ":"), allow_nan=True)
+    else:
+        details_text = str(details or "")
+
+    lines = [
+        f"GUID: {payload.get('GUID', '')}",
+        str(payload.get("username", "")),
+        details_text,
+        "Valve Sequence:",
+    ]
+    for row in payload.get("valveSequence", []):
+        values = list(row[:9]) if isinstance(row, (list, tuple)) else []
+        values.extend([0] * (9 - len(values)))
+        lines.append("\t".join(str(value) for value in values[:9]))
+    lines.extend([
+        "",
+        f"Start Date/Time{payload.get('startTime', '')}",
+    ])
+    if elapsed_line:
+        lines.append(elapsed_line)
+    output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return output_path
 
 
@@ -110,12 +194,7 @@ def _comparison_value(value):
 
 def normalized_header_text(payload: dict) -> str:
     """Return stable, readable JSON text for valve-sequence comparison display."""
-    return json.dumps(
-        _comparison_value(payload.get("valveSequence")),
-        ensure_ascii=False,
-        indent=2,
-        sort_keys=True,
-    )
+    return format_human_json(payload.get("valveSequence"))
 
 
 def compare_header_payloads(raw_payload: dict, text_payload: dict) -> list[str]:
