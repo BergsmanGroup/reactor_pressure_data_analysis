@@ -353,7 +353,9 @@ def compute_exposure_table(
     pressure points. The first and last ``leakrate_phase_reduction`` seconds
     are trimmed from the fit window.
 
-    Returns a list of dicts, one row per sequence index (zero-based).
+    Returns a list of dicts, one row per cycle with nonzero exposure.
+    Each row includes the zero-based ``cycle number`` and the numeric
+    ``sequence`` index assigned to that cycle.
     Each row contains dynamic columns per valve label:
         <valve>_nominal_dose, <valve>_nominal_hold, <valve>_nominal_duration,
         <valve>_exposure, <valve>_mean_pressure, <valve>_leak_rate
@@ -433,7 +435,17 @@ def compute_exposure_table(
             bucket["exposure"] += exposure
             bucket["duration"] += duration
 
-        row = {"sequence": int(cycle - cycle_zero)}
+        sequence_key = cyc_seq_map.get(cycle, "")
+        sequence_text = str(sequence_key)
+        sequence_number = (
+            int(sequence_text[3:])
+            if sequence_text.startswith("seq") and sequence_text[3:].isdigit()
+            else sequence_key
+        )
+        row = {
+            "cycle number": int(cycle - cycle_zero),
+            "sequence": sequence_number,
+        }
         has_nonzero_exposure = False
 
         for phase_head, vals in sorted(grouped.items()):
@@ -468,7 +480,7 @@ def compute_exposure_table(
         if has_nonzero_exposure:
             rows.append(row)
 
-    rows.sort(key=lambda r: r["sequence"])
+    rows.sort(key=lambda r: r["cycle number"])
     return rows
 
 
@@ -496,7 +508,7 @@ def save_exposure_csv(rows: list, out_dir: str, stem: str) -> str:
     prefix_suffix_has_value: dict = {}
     for row in rows:
         for key in row.keys():
-            if key == "sequence":
+            if key in {"cycle number", "sequence"}:
                 continue
             for suffix in suffixes:
                 if key.endswith(suffix):
@@ -507,7 +519,7 @@ def save_exposure_csv(rows: list, out_dir: str, stem: str) -> str:
                         prefix_suffix_has_value[prefix][suffix] = True
                     break
 
-    fieldnames = ["sequence"]
+    fieldnames = ["cycle number", "sequence"]
     for prefix in sorted(valve_prefixes):
         for suffix in suffixes:
             if prefix_suffix_has_value.get(prefix, {}).get(suffix, False):

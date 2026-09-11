@@ -264,16 +264,8 @@ class HeaderEditorDialog(tk.Toplevel):
         details_frame = ttk.LabelFrame(outer, text="Experimental Details", padding=8)
         details_frame.pack(fill="x", pady=(0, 8))
 
-        self._build_experimental_details(details_frame)
-
         self._save_header_text_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
-            outer,
-            text="Also save changes to the header text file",
-            variable=self._save_header_text_var,
-            state="normal" if self._header_text_path else "disabled",
-            command=self._update_unsaved_warning,
-        ).pack(anchor="w", pady=(0, 8))
+        self._build_experimental_details(details_frame)
 
         table_frame = ttk.LabelFrame(outer, text="Timing Table", padding=8)
         table_frame.pack(fill="both", expand=True)
@@ -304,7 +296,13 @@ class HeaderEditorDialog(tk.Toplevel):
             text="Save experimental details as JSON",
             variable=self._save_details_as_json_var,
             command=self._update_unsaved_warning,
-        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(3, 0))
+        ).grid(row=1, column=0, sticky="w", pady=(3, 0))
+        ttk.Checkbutton(
+            form,
+            text="Also save changes to the header text file",
+            variable=self._save_header_text_var,
+            command=self._update_unsaved_warning,
+        ).grid(row=1, column=1, columnspan=3, sticky="w", padx=(12, 0), pady=(3, 0))
         self._details_format_warning = tk.Label(
             form,
             text="",

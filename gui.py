@@ -11,7 +11,6 @@ Imports the three pure-logic modules and wires them to the UI:
 
 import tkinter as tk
 from tkinter import ttk, filedialog, scrolledtext, messagebox
-import difflib
 import threading
 from concurrent.futures import ThreadPoolExecutor
 import os
@@ -57,7 +56,6 @@ from header_editor import open_header_editor
 from header_text import (
     compare_header_payloads,
     format_human_json,
-    normalized_header_text,
     parse_header_text,
     save_converted_header,
     save_header_text,
@@ -1038,7 +1036,7 @@ class ReactorApp(tk.Tk):
             return
         try:
             text_payload = parse_header_text(header_path)
-            converted_path = save_converted_header(header_path, text_payload)
+            save_converted_header(header_path, text_payload)
             raw_payload = read_header(raw_path)
             differences = compare_header_payloads(raw_payload, text_payload)
         except Exception as exc:
@@ -1046,24 +1044,28 @@ class ReactorApp(tk.Tk):
             return
 
         if differences:
-            fields = ", ".join(differences)
-            self._header_comparison_warning_var.set(
-                f"Warning: header.txt differs from raw header ({fields}). Converted: {converted_path.name}"
-            )
-            self._show_header_diff_popup(raw_payload, text_payload, fields)
+            status = "valveSequence does not match"
         else:
-            self._header_comparison_warning_var.set(f"Headers match. Saved {converted_path.name}.")
+            status = "valveSequence matches"
+        self._header_comparison_warning_var.set(status)
+        self._show_header_diff_popup(raw_payload, text_payload, status, bool(differences))
 
-    def _show_header_diff_popup(self, raw_payload: dict, text_payload: dict, fields: str):
+    def _show_header_diff_popup(
+        self,
+        raw_payload: dict,
+        text_payload: dict,
+        status: str,
+        sequence_mismatch: bool,
+    ):
         popup = tk.Toplevel(self)
-        popup.title(f"Header Differences: {fields}")
+        popup.title(status)
         popup.geometry("1200x720")
         popup.transient(self)
 
         ttk.Label(
             popup,
-            text="Different field: valveSequence",
-            foreground="red",
+            text=status,
+            foreground="red" if sequence_mismatch else "green",
         ).pack(anchor="w", padx=10, pady=(8, 4))
 
         panes = ttk.Frame(popup)
@@ -1071,8 +1073,8 @@ class ReactorApp(tk.Tk):
         panes.columnconfigure(0, weight=1)
         panes.columnconfigure(1, weight=1)
         panes.rowconfigure(1, weight=1)
-        ttk.Label(panes, text="Raw data JSON valve sequence").grid(row=0, column=0, sticky="w", padx=(0, 4))
-        ttk.Label(panes, text="Header text valve sequence").grid(row=0, column=1, sticky="w", padx=(4, 0))
+        ttk.Label(panes, text="Raw data JSON header").grid(row=0, column=0, sticky="w", padx=(0, 4))
+        ttk.Label(panes, text="Header text header").grid(row=0, column=1, sticky="w", padx=(4, 0))
 
         left = scrolledtext.ScrolledText(panes, wrap="none", font=("Consolas", 9))
         right = scrolledtext.ScrolledText(panes, wrap="none", font=("Consolas", 9))
@@ -1081,35 +1083,23 @@ class ReactorApp(tk.Tk):
         left.tag_configure("changed", background="#ffd6d6")
         right.tag_configure("changed", background="#fff0b3")
 
-        left_lines = normalized_header_text(raw_payload).splitlines()
-        right_lines = normalized_header_text(text_payload).splitlines()
-        matcher = difflib.SequenceMatcher(None, left_lines, right_lines)
-        left_row = 1
-        right_row = 1
+        left_lines = format_human_json(raw_payload).splitlines()
+        right_lines = format_human_json(text_payload).splitlines()
 
-        def insert_line(widget, line, row, changed):
-            start = f"{row}.0"
-            widget.insert("end", line + "\n")
-            if changed:
-                widget.tag_add("changed", start, f"{row}.end")
+        def insert_header(widget, lines):
+            in_sequence = False
+            for row, line in enumerate(lines, start=1):
+                if '"valveSequence": [' in line:
+                    in_sequence = True
+                changed = sequence_mismatch and in_sequence
+                widget.insert("end", line + "\n")
+                if changed:
+                    widget.tag_add("changed", f"{row}.0", f"{row}.end")
+                if in_sequence and line.strip() == "]":
+                    in_sequence = False
 
-        for operation, left_start, left_end, right_start, right_end in matcher.get_opcodes():
-            if operation == "equal":
-                for left_line, right_line in zip(left_lines[left_start:left_end], right_lines[right_start:right_end]):
-                    insert_line(left, left_line, left_row, False)
-                    insert_line(right, right_line, right_row, False)
-                    left_row += 1
-                    right_row += 1
-            else:
-                left_chunk = left_lines[left_start:left_end]
-                right_chunk = right_lines[right_start:right_end]
-                for index in range(max(len(left_chunk), len(right_chunk))):
-                    left_line = left_chunk[index] if index < len(left_chunk) else ""
-                    right_line = right_chunk[index] if index < len(right_chunk) else ""
-                    insert_line(left, left_line, left_row, bool(left_line))
-                    insert_line(right, right_line, right_row, bool(right_line))
-                    left_row += 1
-                    right_row += 1
+        insert_header(left, left_lines)
+        insert_header(right, right_lines)
 
         left.configure(state="disabled")
         right.configure(state="disabled")
@@ -1450,6 +1440,16 @@ class ReactorApp(tk.Tk):
             return
 
         save_text = bool(edited.pop("__save_header_text__", False))
+        if save_text and not os.path.isfile(header_text_path):
+            header_text_path = filedialog.askopenfilename(
+                title="Select Header Text File to Update",
+                filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+                parent=self,
+            )
+            if not header_text_path:
+                self._log("Header update cancelled: no header text file selected.")
+                return
+            self._header_txt_path.set(header_text_path)
         try:
             self._rewrite_header_payload(path, edited)
             if save_text:
