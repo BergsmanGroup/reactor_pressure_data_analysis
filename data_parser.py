@@ -37,7 +37,10 @@ condensed_path(raw_path) -> Path
 import json
 import os
 import tempfile
+from bisect import bisect_left
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +57,152 @@ def _parse_payload(raw_payload):
             except json.JSONDecodeError:
                 pass
     return raw_payload if isinstance(raw_payload, dict) else {}
+
+
+def _parse_log_timestamp(value):
+    """Parse the ISO timestamps emitted by the temperature controller."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=ZoneInfo("America/Los_Angeles"))
+    return parsed.timestamp()
+
+
+def _temperature_record(obj):
+    """Return ``(timestamp, zones)`` for a telemetry record, if present."""
+    if not isinstance(obj, dict):
+        return None
+    timestamp = _parse_log_timestamp(obj.get("ts"))
+    telemetry = obj.get("telemetry")
+    if timestamp is None or not isinstance(telemetry, dict):
+        return None
+    raw_zones = telemetry.get("zones")
+    if not isinstance(raw_zones, dict):
+        return None
+    zones = {}
+    for zone, values in raw_zones.items():
+        if not isinstance(values, dict):
+            continue
+        if "pv_c" not in values and "sp_abs" not in values:
+            continue
+        zones[str(zone)] = {
+            "TemperatureC": values.get("pv_c"),
+            "SetPointC": values.get("sp_abs"),
+        }
+    return (timestamp, zones) if zones else None
+
+
+def load_temperature_data(source: str | Path) -> list[tuple[float, dict]]:
+    """Load temperature samples from a telemetry directory or run log file."""
+    source_path = Path(source)
+    if source_path.is_dir():
+        paths = sorted(
+            path for path in source_path.rglob("*")
+            if path.is_file() and path.suffix.casefold() in {".jsonl", ".log", ".json"}
+        )
+    elif source_path.is_file():
+        paths = [source_path]
+    else:
+        raise FileNotFoundError(f"Temperature source does not exist: {source}")
+
+    samples = []
+    for path in paths:
+        with path.open(encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    record = _temperature_record(json.loads(line))
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if record:
+                    samples.append(record)
+    samples.sort(key=lambda item: item[0])
+    return samples
+
+
+def temperature_zones(samples: list[tuple[float, dict]]) -> list[str]:
+    """Return the sorted zone identifiers present in temperature samples."""
+    return sorted(
+        {zone for _, zones in samples for zone in zones},
+        key=lambda value: (int(value) if value.isdigit() else float("inf"), value),
+    )
+
+
+def load_service_config_data(source: str | Path) -> list[tuple[float, dict]]:
+    """Load timestamped temperature connection metadata from service logs."""
+    source_path = Path(source)
+    directory = source_path if source_path.is_dir() else source_path.parent
+    paths = sorted(directory.glob("*_service_config_log.jsonl"))
+    samples = []
+    for path in paths:
+        with path.open(encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    obj = json.loads(line)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                timestamp = _parse_log_timestamp(obj.get("ts"))
+                config = obj.get("config")
+                if timestamp is None or not isinstance(config, dict):
+                    continue
+                zone_names = config.get("zone_names", {})
+                if not isinstance(zone_names, dict):
+                    zone_names = {}
+                samples.append((timestamp, {
+                    "com_port": config.get("last_serial_port", ""),
+                    "tcp_host": config.get("last_tcp_host", ""),
+                    "zone_names": {
+                        str(zone): str(name)
+                        for zone, name in zone_names.items()
+                    },
+                }))
+    samples.sort(key=lambda item: item[0])
+    return samples
+
+
+def _service_config_at(samples, timestamp):
+    if not samples or timestamp is None:
+        return None
+    times = [sample[0] for sample in samples]
+    index = bisect_left(times, timestamp)
+    if index == len(samples) or times[index] > timestamp:
+        index -= 1
+    return samples[index][1] if index >= 0 else None
+
+
+def _header_start_timestamp(payload: dict):
+    value = payload.get("startTime")
+    if not isinstance(value, str):
+        return None
+    # Header timestamps append "(PST/PDT)" rather than a numeric offset.
+    value = value.split(" (", 1)[0].strip()
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=ZoneInfo("America/Los_Angeles"))
+    return parsed.timestamp()
+
+
+def _temperature_at(samples, timestamp):
+    if not samples or timestamp is None:
+        return None
+    times = [sample[0] for sample in samples]
+    index = bisect_left(times, timestamp)
+    if index == 0:
+        nearest = 0
+    elif index == len(samples):
+        nearest = index - 1
+    else:
+        nearest = index if times[index] - timestamp < timestamp - times[index - 1] else index - 1
+    return samples[nearest][1]
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +347,9 @@ def condense_log(
     output_path: str | Path | None = None,
     progress_cb = None,
     phase_lookup = None,
+    temperature_samples = None,
+    temperature_zones_to_keep = None,
+    service_config_samples = None,
     return_stats: bool = False,
 ) -> int | dict:
     """
@@ -217,6 +369,14 @@ def condense_log(
     phase_lookup : callable(cycle_int, time_s, raw_step, payload_dict) -> str|None
         Optional callback used to replace ``CurrentStep`` with an exact phase
         label (for example, ``seq2_TDIC_Dose``).
+    temperature_samples : list or None
+        Timestamped temperature samples used to add ``TemperatureZones`` to
+        each condensed data payload.
+    temperature_zones_to_keep : iterable or None
+        Optional zone identifiers to retain in ``TemperatureZones``.
+    service_config_samples : list or None
+        Timestamped service configuration metadata used to populate each
+        condensed data row's ``meta`` field.
     return_stats : bool
         When True, return a dict with row and file-size statistics.
 
@@ -246,6 +406,11 @@ def condense_log(
         write_path = Path(tmp_name)
 
     last_step_payload: dict = {}
+    header_start_timestamp = None
+    selected_zones = (
+        {str(zone) for zone in temperature_zones_to_keep}
+        if temperature_zones_to_keep is not None else None
+    )
     rows_written = 0
     bytes_read   = 0
     total_rows   = 0
@@ -266,6 +431,10 @@ def condense_log(
                     # Always copy header and footer verbatim.
                     if rtype in ("header", "footer"):
                         fh_out.write(line if line.endswith("\n") else line + "\n")
+                        if rtype == "header":
+                            header_start_timestamp = _header_start_timestamp(
+                                _parse_payload(obj.get("payload", {}))
+                            )
                         continue
 
                     # Track the most recent step context.
@@ -307,9 +476,47 @@ def condense_log(
                             "Pressure": pl.get("Pressure", ""),
                             "GUID": pl.get("GUID", ""),
                         }
+                        if temperature_samples:
+                            try:
+                                absolute_timestamp = (
+                                    header_start_timestamp + t_s
+                                    if header_start_timestamp is not None else None
+                                )
+                                temperatures = _temperature_at(
+                                    temperature_samples, absolute_timestamp
+                                )
+                                if temperatures:
+                                    if selected_zones is not None:
+                                        temperatures = {
+                                            zone: values
+                                            for zone, values in temperatures.items()
+                                            if zone in selected_zones
+                                        }
+                                    merged["TemperatureZones"] = temperatures
+                            except (TypeError, ValueError):
+                                pass
+                        if service_config_samples:
+                            try:
+                                absolute_timestamp = (
+                                    header_start_timestamp + t_s
+                                    if header_start_timestamp is not None else None
+                                )
+                                config_metadata = _service_config_at(
+                                    service_config_samples, absolute_timestamp
+                                )
+                                if config_metadata is not None:
+                                    data_row_meta = {
+                                        "temperature": config_metadata
+                                    }
+                                else:
+                                    data_row_meta = ""
+                            except (TypeError, ValueError):
+                                data_row_meta = ""
+                        else:
+                            data_row_meta = ""
                         data_row = {
                             "type": "data",
-                            "meta": "",
+                            "meta": data_row_meta,
                             "payload": json.dumps(merged, ensure_ascii=False,
                                                   separators=(",", ":")),
                         }

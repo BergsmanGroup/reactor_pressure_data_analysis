@@ -10,6 +10,7 @@ import copy
 import json
 import tkinter as tk
 from tkinter import ttk
+from typing import Callable
 
 DETAIL_SCALAR_FIELDS = [
     ("Info", "Info", "text"),
@@ -182,7 +183,13 @@ class _ScrollableFrame(ttk.Frame):
 
 
 class HeaderEditorDialog(tk.Toplevel):
-    def __init__(self, parent, payload: dict, header_text_path: str = ""):
+    def __init__(
+        self,
+        parent,
+        payload: dict,
+        header_text_path: str = "",
+        regenerate_callback: Callable[[], dict | None] | None = None,
+    ):
         super().__init__(parent)
         self.title("Edit Header")
         self.transient(parent)
@@ -193,20 +200,9 @@ class HeaderEditorDialog(tk.Toplevel):
         self.result: dict | None = None
         self._payload = copy.deepcopy(payload) if isinstance(payload, dict) else {}
         self._header_text_path = header_text_path
+        self._regenerate_callback = regenerate_callback
         self._details_structured, self._details_value = _extract_details(self._payload)
-        self._username_original = _clean_text(self._payload.get("username", ""))
-        self._table_original = _normalize_table(self._payload.get("valveSequence", []))
-        if isinstance(self._details_value, dict):
-            self._details_original = copy.deepcopy(self._details_value)
-        elif isinstance(self._details_value, str):
-            _text = self._details_value.strip()
-            try:
-                _parsed = json.loads(_text) if _text else {}
-                self._details_original = _parsed if isinstance(_parsed, dict) else {"Info": _text}
-            except (json.JSONDecodeError, ValueError):
-                self._details_original = {"Info": _text}
-        else:
-            self._details_original = {}
+        self._set_original_values()
 
         self._field_vars: dict[str, tk.StringVar] = {}
         self._field_widgets: dict[str, tk.Widget] = {}
@@ -221,8 +217,6 @@ class HeaderEditorDialog(tk.Toplevel):
 
         self.protocol("WM_DELETE_WINDOW", self._on_cancel)
         self.bind("<Escape>", lambda _event: self._on_cancel())
-        self.bind("<Control-s>", lambda _event: self._on_save())
-        self.bind("<Command-s>", lambda _event: self._on_save())
 
         self.update_idletasks()
         self._center_over_parent(parent)
@@ -282,6 +276,12 @@ class HeaderEditorDialog(tk.Toplevel):
         self._unsaved_warning.pack(side="left")
         ttk.Button(button_row, text="Save", command=self._on_save).pack(side="right", padx=(6, 0))
         ttk.Button(button_row, text="Cancel", command=self._on_cancel).pack(side="right")
+        if self._regenerate_callback is not None:
+            ttk.Button(
+                button_row,
+                text="Regenerate header from recipe sheet",
+                command=self._on_regenerate,
+            ).pack(side="left")
 
     def _build_experimental_details(self, parent):
         form = ttk.Frame(parent)
@@ -455,6 +455,33 @@ class HeaderEditorDialog(tk.Toplevel):
         self._username_var.set(self._username_original)
         self._populate_details_fields()
         self._reset_table_rows()
+
+    def _set_original_values(self):
+        self._details_structured, self._details_value = _extract_details(self._payload)
+        self._username_original = _clean_text(self._payload.get("username", ""))
+        self._table_original = _normalize_table(self._payload.get("valveSequence", []))
+        if isinstance(self._details_value, dict):
+            self._details_original = copy.deepcopy(self._details_value)
+        elif isinstance(self._details_value, str):
+            text = self._details_value.strip()
+            try:
+                parsed = json.loads(text) if text else {}
+                self._details_original = parsed if isinstance(parsed, dict) else {"Info": text}
+            except (json.JSONDecodeError, ValueError):
+                self._details_original = {"Info": text}
+        else:
+            self._details_original = {}
+
+    def _on_regenerate(self):
+        regenerated = self._regenerate_callback() if self._regenerate_callback is not None else None
+        if not isinstance(regenerated, dict):
+            return
+        self._payload = copy.deepcopy(regenerated)
+        self._set_original_values()
+        self._save_details_as_json_var.set(self._details_structured)
+        self._populate_from_payload()
+        self._saved_editor_state = self._editor_state()
+        self._update_unsaved_warning()
 
     def _update_details_format_warning(self):
         if self._details_structured and not self._save_details_as_json_var.get():
@@ -650,7 +677,12 @@ class HeaderEditorDialog(tk.Toplevel):
         self.destroy()
 
 
-def open_header_editor(parent, payload: dict, header_text_path: str = ""):
-    dialog = HeaderEditorDialog(parent, payload, header_text_path)
+def open_header_editor(
+    parent,
+    payload: dict,
+    header_text_path: str = "",
+    regenerate_callback: Callable[[], dict | None] | None = None,
+):
+    dialog = HeaderEditorDialog(parent, payload, header_text_path, regenerate_callback)
     parent.wait_window(dialog)
     return dialog.result

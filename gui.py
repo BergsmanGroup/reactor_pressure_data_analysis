@@ -39,6 +39,7 @@ from sequence_utils import (
 from data_parser import (
     read_header, stream_pressure, subtract_baseline,
     condense_log, condensed_path, is_condensed_file,
+    load_temperature_data, temperature_zones, load_service_config_data,
 )
 from plot_utils  import (
     build_segments,
@@ -94,6 +95,13 @@ class ReactorApp(tk.Tk):
         self._thickness_blank_rows_var = tk.StringVar()
         self._preview_cycle_var = tk.StringVar(value="1")
         self._write_condensed_json_var = tk.BooleanVar(value=True)
+        self._add_temperature_var = tk.BooleanVar(value=True)
+        self._temperature_source_mode = tk.StringVar(value="directory")
+        self._temperature_directory_var = tk.StringVar(
+            value=r"C:\Users\Owner\Desktop\GitHub\brg_cn616a_UPDATED\logs"
+        )
+        self._temperature_file_var = tk.StringVar()
+        self._temperature_zones_vars: dict[str, tk.BooleanVar] = {}
         self._exclude_falsey_edr_tags_var = tk.BooleanVar(value=False)
         self._ise_file_path     = tk.StringVar()
         self._recipe_sheet_path = tk.StringVar()
@@ -195,6 +203,44 @@ class ReactorApp(tk.Tk):
             anchor="w",
             justify="left",
         ).pack(side="left", padx=(8, 0))
+
+        # -- Temperature source -----------------------------------------------
+        temp_frame = ttk.LabelFrame(parent, text="Temperature Data", padding=8)
+        temp_frame.pack(fill="x", **pad)
+        ttk.Checkbutton(
+            temp_frame, text="Add temperature data to condensed payload",
+            variable=self._add_temperature_var,
+        ).grid(row=0, column=0, columnspan=4, sticky="w")
+        ttk.Radiobutton(
+            temp_frame, text="Log directory",
+            variable=self._temperature_source_mode, value="directory",
+            command=self._refresh_temperature_source,
+        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+        self._temperature_directory_entry = ttk.Entry(
+            temp_frame, textvariable=self._temperature_directory_var, width=58)
+        self._temperature_directory_entry.grid(
+            row=1, column=1, columnspan=2, sticky="ew", padx=4, pady=(4, 0))
+        self._temperature_directory_browse = ttk.Button(
+            temp_frame, text="Browse...", command=self._browse_temperature_directory)
+        self._temperature_directory_browse.grid(row=1, column=3, padx=(0, 4), pady=(4, 0))
+        ttk.Radiobutton(
+            temp_frame, text="Specific run log file",
+            variable=self._temperature_source_mode, value="file",
+            command=self._refresh_temperature_source,
+        ).grid(row=2, column=0, sticky="w")
+        self._temperature_file_entry = ttk.Entry(
+            temp_frame, textvariable=self._temperature_file_var, width=58)
+        self._temperature_file_entry.grid(row=2, column=1, columnspan=2, sticky="ew", padx=4)
+        self._temperature_file_browse = ttk.Button(
+            temp_frame, text="Choose run log...", command=self._browse_temperature_file)
+        self._temperature_file_browse.grid(row=2, column=3, padx=(0, 4))
+        ttk.Label(temp_frame, text="Zones (auto-detected; uncheck to omit):").grid(
+            row=3, column=0, sticky="nw", pady=(5, 0))
+        self._temperature_zones_frame = ttk.Frame(temp_frame)
+        self._temperature_zones_frame.grid(
+            row=3, column=1, columnspan=3, sticky="w", pady=(5, 0))
+        temp_frame.columnconfigure(1, weight=1)
+        self._refresh_temperature_source()
 
         # -- iSE thickness source file ----------------------------------------
         ise_frame = ttk.LabelFrame(parent, text="iSE Data File", padding=8)
@@ -910,6 +956,10 @@ class ReactorApp(tk.Tk):
         leakrate_phase_reduction = last.get("leakrate_phase_reduction")
         thickness_blank_rows = last.get("thickness_blank_rows")
         write_condensed_json = last.get("write_condensed_json")
+        add_temperature = last.get("add_temperature")
+        temperature_directory = last.get("temperature_directory")
+        temperature_file = last.get("temperature_file")
+        temperature_source_mode = last.get("temperature_source_mode")
         leakrate_phase_reduction = last.get("leakrate_phase_reduction")
         if xlim is not None:
             self._xlim_var.set(str(xlim))
@@ -935,6 +985,14 @@ class ReactorApp(tk.Tk):
             self._thickness_blank_rows_var.set(str(thickness_blank_rows))
         if write_condensed_json is not None:
             self._write_condensed_json_var.set(bool(write_condensed_json))
+        if add_temperature is not None:
+            self._add_temperature_var.set(bool(add_temperature))
+        if temperature_directory is not None:
+            self._temperature_directory_var.set(str(temperature_directory))
+        if temperature_file is not None:
+            self._temperature_file_var.set(str(temperature_file))
+        if temperature_source_mode in ("directory", "file"):
+            self._temperature_source_mode.set(temperature_source_mode)
         if leakrate_phase_reduction is not None:
             self._leakrate_phase_reduction_var.set(str(leakrate_phase_reduction))
 
@@ -970,6 +1028,10 @@ class ReactorApp(tk.Tk):
             "leakrate_phase_reduction": self._leakrate_phase_reduction_var.get().strip(),
             "thickness_blank_rows": self._thickness_blank_rows_var.get().strip(),
             "write_condensed_json": self._write_condensed_json_var.get(),
+            "add_temperature": self._add_temperature_var.get(),
+            "temperature_directory": self._temperature_directory_var.get().strip(),
+            "temperature_file": self._temperature_file_var.get().strip(),
+            "temperature_source_mode": self._temperature_source_mode.get(),
             "leakrate_phase_reduction": self._leakrate_phase_reduction_var.get().strip(),
         }
 
@@ -1138,6 +1200,63 @@ class ReactorApp(tk.Tk):
     # =========================================================================
     #  File browsing
     # =========================================================================
+
+    def _temperature_source_path(self):
+        if self._temperature_source_mode.get() == "file":
+            return self._temperature_file_var.get().strip()
+        return self._temperature_directory_var.get().strip()
+
+    def _refresh_temperature_source(self):
+        directory_mode = self._temperature_source_mode.get() == "directory"
+        dir_state = "normal" if directory_mode else "disabled"
+        file_state = "disabled" if directory_mode else "normal"
+        self._temperature_directory_entry.configure(state=dir_state)
+        self._temperature_directory_browse.configure(state=dir_state)
+        self._temperature_file_entry.configure(state=file_state)
+        self._temperature_file_browse.configure(state=file_state)
+        self._detect_temperature_zones()
+
+    def _detect_temperature_zones(self):
+        for child in self._temperature_zones_frame.winfo_children():
+            child.destroy()
+        self._temperature_zones_vars.clear()
+        if not self._add_temperature_var.get():
+            return
+        source = self._temperature_source_path()
+        if not source:
+            return
+        try:
+            zones = temperature_zones(load_temperature_data(source))
+        except (OSError, ValueError) as exc:
+            if hasattr(self, "_log_box"):
+                self._log(f"Temperature data warning: {exc}")
+            return
+        for index, zone in enumerate(zones):
+            var = tk.BooleanVar(value=True)
+            self._temperature_zones_vars[zone] = var
+            ttk.Checkbutton(
+                self._temperature_zones_frame, text=f"Zone {zone}", variable=var
+            ).grid(row=index // 6, column=index % 6, sticky="w", padx=(0, 8))
+        if zones:
+            if hasattr(self, "_log_box"):
+                self._log(f"Detected temperature zones: {', '.join(zones)}")
+
+    def _browse_temperature_directory(self):
+        path = filedialog.askdirectory(title="Select Temperature Log Directory")
+        if path:
+            self._temperature_directory_var.set(path)
+            self._temperature_source_mode.set("directory")
+            self._refresh_temperature_source()
+
+    def _browse_temperature_file(self):
+        path = filedialog.askopenfilename(
+            title="Select Temperature Run Log",
+            filetypes=[("Log files", "*.jsonl *.log *.json"), ("All files", "*.*")]
+        )
+        if path:
+            self._temperature_file_var.set(path)
+            self._temperature_source_mode.set("file")
+            self._refresh_temperature_source()
 
     def _browse_file(self):
         path = filedialog.askopenfilename(
@@ -1435,7 +1554,12 @@ class ReactorApp(tk.Tk):
                 return
 
         header_text_path = self._header_txt_path.get().strip()
-        edited = open_header_editor(self, self._header_info, header_text_path)
+        edited = open_header_editor(
+            self,
+            self._header_info,
+            header_text_path,
+            regenerate_callback=self._regenerate_header_from_recipe_sheet,
+        )
         if edited is None:
             return
 
@@ -1462,6 +1586,49 @@ class ReactorApp(tk.Tk):
 
         self._log("Header updated.")
         self._load_header()
+
+    def _regenerate_header_from_recipe_sheet(self):
+        recipe_path = filedialog.askopenfilename(
+            title="Select Recipe Workbook",
+            filetypes=[
+                ("Excel files", "*.xlsx;*.xls"),
+                ("CSV files", "*.csv"),
+                ("All files", "*.*"),
+            ],
+            parent=self,
+        )
+        if not recipe_path:
+            return None
+
+        try:
+            recipe_df = load_table(Path(recipe_path))
+            validation_errors = validate_recipe_sheet(recipe_df)
+            if validation_errors:
+                messagebox.showerror(
+                    "Regenerate Header",
+                    "The selected recipe sheet is not valid:\n\n"
+                    + "\n".join(validation_errors),
+                    parent=self,
+                )
+                return None
+
+            filename_report = build_output_filename_report(recipe_df)
+            recipe_payload = build_payload(
+                recipe_df,
+                username=filename_report["sanitized"] if filename_report else None,
+            )
+            return {
+                "username": recipe_payload["username"],
+                "experimentalDetails": recipe_payload["experimentalDetails"],
+                "valveSequence": recipe_payload["recipe"],
+            }
+        except Exception as exc:
+            messagebox.showerror(
+                "Regenerate Header",
+                f"Could not load the recipe workbook:\n\n{exc}",
+                parent=self,
+            )
+            return None
 
     def _populate_valve_fields(self):
         for w in self._valve_frame.winfo_children():
@@ -1535,6 +1702,11 @@ class ReactorApp(tk.Tk):
             self._get_float(self._leakrate_phase_reduction_var),
         )
         write_condensed_json = self._write_condensed_json_var.get()
+        add_temperature = self._add_temperature_var.get()
+        temperature_source = self._temperature_source_path()
+        selected_temperature_zones = [
+            zone for zone, var in self._temperature_zones_vars.items() if var.get()
+        ]
 
         self._persist_processing_preferences(valve_names)
 
@@ -1558,6 +1730,9 @@ class ReactorApp(tk.Tk):
                 wait_time,
                 leakrate_phase_reduction,
                 write_condensed_json,
+                add_temperature,
+                temperature_source,
+                selected_temperature_zones,
             ),
             daemon=True,
         ).start()
@@ -1577,6 +1752,9 @@ class ReactorApp(tk.Tk):
         wait_time,
         leakrate_phase_reduction,
         write_condensed_json,
+        add_temperature,
+        temperature_source,
+        selected_temperature_zones,
     ):
         """Worker function — runs in a background thread."""
         try:
@@ -1662,12 +1840,25 @@ class ReactorApp(tk.Tk):
                             return None
                         return _format_phase_for_step(phase)
 
+                    temperature_samples = None
+                    service_config_samples = load_service_config_data(temperature_source)
+                    if add_temperature:
+                        temperature_samples = load_temperature_data(temperature_source)
+                        self._log(
+                            f"  Loaded {len(temperature_samples):,} temperature samples"
+                        )
+                    self._log(
+                        f"  Loaded {len(service_config_samples):,} service config entries"
+                    )
                     condensed_future = condensed_executor.submit(
                         lambda: self._run_save_with_retry(
                             lambda: condense_log(
                                 path,
                                 condensed_out,
                                 phase_lookup=_phase_lookup,
+                                temperature_samples=temperature_samples,
+                                temperature_zones_to_keep=selected_temperature_zones,
+                                service_config_samples=service_config_samples,
                                 return_stats=True,
                             ),
                             condensed_out,

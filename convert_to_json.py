@@ -209,7 +209,7 @@ def _split_embedded_values(value: str) -> list[str]:
 
 
 def _parse_header_value(label: str, row_values: list[str]):
-    if label in {"Info", "User/File Name Info"}:
+    if label in {"Info", "User/File Name Info", "Username"}:
         return _parse_detail_token(row_values[0] if row_values else "")
 
     if label == "Wait time":
@@ -257,6 +257,11 @@ def extract_header_details(df: pd.DataFrame) -> tuple[str, dict]:
     return username_base, details
 
 
+def _find_header_row(norm_col0: pd.Series, label: str, stop_idx: int) -> int | None:
+    matches = norm_col0.iloc[:stop_idx][norm_col0.iloc[:stop_idx] == label].index
+    return int(matches[0]) if len(matches) else None
+
+
 def validate_recipe_sheet(df: pd.DataFrame) -> list[str]:
     """
     Validate a recipe-sheet dataframe against the new workbook format requirements.
@@ -293,37 +298,45 @@ def validate_recipe_sheet(df: pd.DataFrame) -> list[str]:
     if pre_recipe_labels & {"SID", "EID", "PID"}:
         return []
 
+    valve_row = _find_header_row(norm_col0, "Valve/precursor", recipe_header_idx)
+    name_row = _find_header_row(norm_col0, "Name", recipe_header_idx)
+    temperature_row = _find_header_row(norm_col0, "Temperature (C)", recipe_header_idx)
+    if valve_row is None or name_row is None or temperature_row is None:
+        errors.append(
+            'Could not find the required "Valve/precursor", "Name", and '
+            '"Temperature (C)" metadata rows before the recipe table.'
+        )
+        return errors
+
     # --- structural row checks ------------------------------------------------
-    # Row 6 (0-based index 5), column B (index 1): Chamber valve slot must be "nan".
-    b6 = cell(5, 1)
+    # The metadata rows may move as instructions or other header rows are added.
+    b6 = cell(valve_row, 1)
     if b6.lower() != "nan":
         errors.append(
-            f'Row 6, column B (Chamber valve slot) must be "nan"; got "{b6}".'
+            f'Valve/precursor row, column B (Chamber valve slot) must be "nan"; got "{b6}".'
         )
 
-    # Row 7 (0-based index 6), column B (index 1): Chamber name must be "Chamber".
-    b7 = cell(6, 1)
+    b7 = cell(name_row, 1)
     if b7 != "Chamber":
         errors.append(
-            f'Row 7, column B (Chamber name) must be "Chamber"; got "{b7}".'
+            f'Name row, column B (Chamber name) must be "Chamber"; got "{b7}".'
         )
 
-    # Row 8 (0-based index 7), column B (index 1): Chamber temperature must be numeric.
-    b8 = cell(7, 1)
+    b8 = cell(temperature_row, 1)
     try:
         if not b8:
             raise ValueError("empty")
         float(b8)
     except ValueError:
         errors.append(
-            f'Row 8, column B (Chamber temperature) must be a number; got "{b8}".'
+            f'Temperature (C) row, column B (Chamber temperature) must be a number; got "{b8}".'
         )
 
     # --- valve coverage check -------------------------------------------------
-    # Declared valves: row 6, columns C–J (0-based indices 2–9).
+    # Declared valves: valve metadata row, columns C–J (0-based indices 2–9).
     declared_valves: set[str] = set()
     for col_idx in range(2, min(10, df.shape[1])):
-        v = cell(5, col_idx)
+        v = cell(valve_row, col_idx)
         if v and v.lower() != "nan":
             declared_valves.add(v)
 
@@ -458,14 +471,30 @@ def build_output_filename_report(df: pd.DataFrame, exclude_falsey_edr_tags: bool
     if pre_labels & {"SID", "EID", "PID"}:
         return None
 
-    # --- fixed header cells --------------------------------------------------
-    b1 = sanitize(cell(0, 1))            # Username value (B1)
-    a4 = sanitize(cell(3, 0))            # "EDR" label  (A4)
-    b4 = format_edr(cell(3, 1))          # EDR value    (B4)
-    a5 = sanitize(cell(4, 0))            # "DID" label  (A5)
-    b5_raw = cell(4, 1)                  # DID raw value (B5), may be comma-list
-    b7 = sanitize(cell(6, 1))            # Chamber name (B7)
-    b8 = fmt_num(cell(7, 1))            # Chamber temp (B8)
+    # --- metadata cells ------------------------------------------------------
+    username_row = _find_header_row(norm_col0, "Username", recipe_header_idx)
+    edr_row = _find_header_row(norm_col0, "EDR", recipe_header_idx)
+    did_row = _find_header_row(norm_col0, "DID", recipe_header_idx)
+    valve_row = _find_header_row(norm_col0, "Valve/precursor", recipe_header_idx)
+    name_row = _find_header_row(norm_col0, "Name", recipe_header_idx)
+    temperature_row = _find_header_row(norm_col0, "Temperature (C)", recipe_header_idx)
+    if None in {
+        username_row,
+        edr_row,
+        did_row,
+        valve_row,
+        name_row,
+        temperature_row,
+    }:
+        return None
+
+    b1 = sanitize(cell(username_row, 1))
+    a4 = sanitize(cell(edr_row, 0))
+    b4 = format_edr(cell(edr_row, 1))
+    a5 = sanitize(cell(did_row, 0))
+    b5_raw = cell(did_row, 1)
+    b7 = sanitize(cell(name_row, 1))
+    b8 = fmt_num(cell(temperature_row, 1))
 
     # Format DID: "117, 119" → "117-119"
     b5 = format_did(b5_raw)
@@ -508,9 +537,9 @@ def build_output_filename_report(df: pd.DataFrame, exclude_falsey_edr_tags: bool
 
     # Additional valve columns C–J (0-based column indices 2–9).
     for col_idx in range(2, min(10, df.shape[1])):
-        valve_num = cell(5, col_idx)   # row 6: declared valve number
-        name     = cell(6, col_idx)    # row 7: valve name
-        temp_raw = cell(7, col_idx)    # row 8: valve temperature
+        valve_num = cell(valve_row, col_idx)
+        name     = cell(name_row, col_idx)
+        temp_raw = cell(temperature_row, col_idx)
 
         if not valve_num or valve_num.lower() == "nan":
             continue
