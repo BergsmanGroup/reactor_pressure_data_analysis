@@ -8,6 +8,8 @@ Module layout
 sequence_utils.py  -- valve sequence parsing and phase-bin computation
 data_parser.py     -- streaming NDJSON file reader
 plot_utils.py      -- matplotlib figure building and batch saving
+pipeline.py        -- staged processing pipeline (condense, label phases,
+                      attach temperature, preview, generate outputs)
 gui.py             -- tkinter ReactorApp window
 reactor_plotter.py -- this file; launch the app
 """

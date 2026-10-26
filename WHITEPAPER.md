@@ -27,15 +27,17 @@ The Reactor Pressure Data Analyzer is a desktop application for post-processing 
 
 ## 1. System Architecture
 
-The application is organized as a single-window Tkinter GUI (`reactor_plotter.py` → `gui.py`) that delegates all non-UI work to a set of stateless utility modules. Background work (file parsing, plot rendering) is dispatched to a `ThreadPoolExecutor` so the GUI remains responsive during long operations. Session parameters are persisted to the local `config_local.json` and reloaded on startup.
+The application is organized as a single-window Tkinter GUI (`reactor_plotter.py` → `gui.py`) that delegates all non-UI work to a set of stateless utility modules plus one stateful orchestration module. Each background operation (condensing, phase labeling, temperature attachment, preview rendering, and plot/animation generation) runs on its own background `threading.Thread` so the GUI remains responsive during long operations. Session parameters are persisted to the local `config_local.json` and reloaded on startup.
 
 ```
 reactor_plotter.py          Entry point; instantiates ReactorApp
 │
 └── gui.py  (ReactorApp)    Main window with two tabs
-      ├── data_parser.py    NDJSON streaming and condensing
-      ├── sequence_utils.py Valve sequence → phase-bin timeline
-      ├── plot_utils.py     Matplotlib figure building and exposure math
+      ├── pipeline.py       Staged processing pipeline (condense, label
+      │                     phases, attach temperature, preview, generate)
+      │     ├── data_parser.py    NDJSON streaming and condensing
+      │     ├── sequence_utils.py Valve sequence → phase-bin timeline
+      │     └── plot_utils.py     Matplotlib figure building and exposure math
       ├── ise_utils.py      In-situ ellipsometer CSV parsing
       ├── header_editor.py  Modal header-field editor
       └── convert_to_json.py  CSV recipe → JSON payload
@@ -43,7 +45,15 @@ reactor_plotter.py          Entry point; instantiates ReactorApp
 
 ### Tab 1 — Reactor Plots
 
-Loads a raw (or previously condensed) NDJSON data file, parses its embedded valve-sequence header, partitions pressure readings into named phases, renders one PNG per cycle, computes exposure metrics, and optionally produces an animated GIF.
+Loads a raw (or previously condensed) NDJSON data file, parses its embedded valve-sequence header, and runs a staged pipeline (see [Section 4](#4-processing-pipeline--reactor-plots)):
+1. Condense the raw file into a small working file.
+2. Compute and label phase sequences.
+3. Optionally attach temperature data.
+4. (Detailed iSE attachment is not yet implemented.)
+5. Preview any single cycle interactively.
+6. Generate every cycle PNG, the exposure CSV, the iSE thickness CSV, and an animated GIF.
+
+A single "Run All" button chains steps 1, 2, 3 (if enabled), and 6 for one-click processing; each step also has its own button for incremental, re-runnable work.
 
 ### Tab 2 — Convert Recipe Sheet
 
@@ -148,15 +158,34 @@ Iterates the file line by line, maintaining a rolling step-context buffer. Disca
 
 Calls `progress_cb(fraction)` every ~4 MB to drive the GUI progress bar.
 
-**`condense_log(input_path, output_path, phase_lookup)`**  
-Single-pass conversion of raw → condensed format. The optional `phase_lookup(cycle, t_s) → str` callback can replace raw controller step labels with computed phase names.
+**`condense_log(input_path, output_path, phase_lookup, temperature_samples, service_config_samples)`**  
+Converts raw NDJSON into the condensed format, merging each `step` record's context into the following `pressure` record(s). All arguments beyond `input_path`/`output_path` are optional and independent, and the function is safe to call repeatedly on its own output (e.g. condense, then a later pass to bake in phase labels, then a later pass to bake in temperature data) — fields written by an earlier pass that aren't recomputed by a later pass are carried forward rather than dropped. `pipeline.py` relies on this re-entrant behavior to implement its staged workflow.
 
 **`is_condensed_file(path) → bool`**  
 Peeks at the first non-empty line; returns `True` if it has `"type":"data"`.
 
 ---
 
-### 3.2 `sequence_utils.py`
+### 3.2 `pipeline.py`
+
+Stateful, GUI-independent orchestration for the staged processing workflow. `gui.py` builds one `ReactorPipeline` per loaded raw file and calls its methods from background threads; the class has no tkinter dependency, so it can equally be driven from a script or test.
+
+**`ProcessingOptions`** — a dataclass holding every user-adjustable knob (valve names, axis limits, grid settings, shift, wait time, leak-rate trim, condensed-JSON/temperature toggles, iSE thickness settings, animation FPS).
+
+**`ReactorPipeline(raw_path, out_dir, seq_dict, options, sequence_note_fn, save_fn)`**
+
+- **`condense(progress_cb, log_cb) → stats`** — Stage 1. Merges the raw file into a small working file (the conventional `_condensed.json` path, or a throwaway temp file when "Write condensed data JSON" is off) and caches the parsed `cycle_points`/`cycle_start_map`/baseline so every later stage reads the small working file instead of the original raw file.
+- **`label_phases(log_cb)`** — Stage 2. Computes phase bins/names from the header valve sequence (fast, in-memory) and, when a condensed JSON artifact is being kept, bakes per-row phase labels into the working file.
+- **`attach_temperature(progress_cb, log_cb) → stats | None`** — Stage 3 (optional). Bakes temperature and service-config metadata into the working file. Has no effect on plots — temperature only enriches the condensed JSON artifact.
+- **`preview_cycle(cycle, progress_cb, log_cb) → Figure`** — Stage 5. Renders one cycle, always recomputing the phase structure from the live shift/valve-name options so tweaking those never requires re-running Condense.
+- **`generate_outputs(progress_cb, log_cb) → dict`** — Stage 6. Batch-renders every cycle PNG, the exposure CSV, the iSE thickness CSV, and the animation GIF.
+- **`run_all(progress_cb, log_cb) → dict`** — Convenience method chaining condense → label phases → (optional) attach temperature → generate outputs, backing the GUI's "Run All" button.
+
+Detailed iSE data attachment (stage 4) is not implemented; `ise_utils.py` still only provides the simple thickness-CSV export used by `generate_outputs()`.
+
+---
+
+### 3.3 `sequence_utils.py`
 
 Converts the raw valve-sequence array from the header into named, time-indexed phase bins.
 
@@ -191,7 +220,7 @@ Generates a stable `{phase_name: (R, G, B, A)}` mapping. Colors are derived from
 
 ---
 
-### 3.3 `plot_utils.py`
+### 3.4 `plot_utils.py`
 
 All matplotlib logic. Operates on the Agg backend (no display required) so plots can be saved from a background thread.
 
@@ -216,7 +245,7 @@ Stitches the saved cycle PNGs into an animated GIF using Pillow. Returns the out
 
 ---
 
-### 3.4 `ise_utils.py`
+### 3.5 `ise_utils.py`
 
 **`parse_ise_thickness(ise_csv_path) → list[float]`**  
 Reads iSE data, auto-detects quoted tab-delimited format, and returns the thickness column as a list of floats.
@@ -226,14 +255,14 @@ Writes the thickness values to a single-column CSV, inserting `blank_rows` empty
 
 ---
 
-### 3.5 `header_editor.py`
+### 3.6 `header_editor.py`
 
 **`HeaderEditorDialog(parent, header_dict)`**  
 A modal `Toplevel` window that presents the full header payload as an editable form. Scalar fields use `Entry` widgets; valve and sequence tables use `Treeview` grids. Changes are applied to a deep copy of the header; the caller receives the modified dict only if the user clicks Save.
 
 ---
 
-### 3.6 `convert_to_json.py`
+### 3.7 `convert_to_json.py`
 
 **`load_table(csv_path) → DataFrame`**  
 Reads the recipe CSV with pandas, preserving all cells including blanks.
@@ -256,7 +285,7 @@ Formats a filename stem encoding the key experimental identifiers:
 
 ---
 
-### 3.7 `gui.py`
+### 3.8 `gui.py`
 
 **`ReactorApp(tk.Tk)`** — the root window.
 
@@ -276,14 +305,14 @@ On startup, the local `config_local.json` is read and all widget variables are p
 | iSE blank rows | `config_default.json` | Blank-row spacing in ellipsometer output CSV |
 
 **Threading:**  
-File reading and all plot-generation work runs in a `ThreadPoolExecutor`. Progress updates are posted to the main thread via `widget.after(0, callback)` to avoid Tkinter thread-safety issues. The log text box receives append calls through the same mechanism.
+Each pipeline stage (condense, label phases, attach temperature, preview, generate outputs, run all) is dispatched to its own `threading.Thread` from the corresponding button handler, calling into a `ReactorPipeline` instance (see [Section 3.2](#32-pipelinepy)). Progress updates are posted to the main thread via `widget.after(0, callback)` to avoid Tkinter thread-safety issues. The log text box receives append calls through the same mechanism.
 
 ---
 
 ## 4. Processing Pipeline — Reactor Plots
 
 ```
-User selects NDJSON file
+User selects NDJSON file, clicks "Load Header"
         │
         ▼
 data_parser.read_header()
@@ -297,43 +326,53 @@ sequence_utils.convert_sequence()
         │     → user can modify fields in-place
         │
         ▼
-sequence_utils.compute_phase_bins(seq_dict, shift)
-  → phase_bins and phase_names per sequence
+gui.py builds a pipeline.ReactorPipeline(raw_path, out_dir, seq_dict, options)
         │
         ▼
-sequence_utils.make_cycle_seq_map(seq_dict)
-  → {cycle_id: "seqN"}
+Stage 1  pipeline.condense()
+  → merges raw NDJSON into a small working file (temp file, or the
+    conventional _condensed.json path) via data_parser.condense_log();
+    re-parses the small working file with data_parser.stream_pressure()
+    and caches cycle_points / cycle_start_map / baseline
         │
         ▼
-data_parser.stream_pressure(path, wait_time, progress_cb)
-  → cycle_points, cycle_start_map
-        │
-        ├── [optional] data_parser.condense_log()
-        │     → write _condensed.json for fast re-runs
-        │
-        ▼
-For each cycle:
-  plot_utils.build_segments(...)
-    → {phase_name: [(t, P), ...]}
-          │
-          ▼
-  plot_utils.draw_cycle_figure(...)
-    → matplotlib Figure
-          │
-          ▼
-  plot_utils.save_cycle_figure(...)
-    → cycle_NNNN.png
-        │
-        ▼
-plot_utils.compute_exposure_table(all_cycles, ...)
-  → list of per-cycle metric rows
-        │
-        ▼
-plot_utils.save_exposure_csv(rows, out_dir, stem)
-  → {stem}_exposure.csv
+Stage 2  pipeline.label_phases()
+  → sequence_utils.compute_phase_bins(seq_dict, shift) + make_cycle_seq_map()
+    (fast, in-memory); optionally bakes phase labels into the working file
         │
         ▼ [optional]
-plot_utils.build_animation(cycles, out_dir, fps, dpi)
+Stage 3  pipeline.attach_temperature()
+  → bakes temperature + service-config metadata into the working file
+    (does not affect plots)
+        │
+        ├── [optional, not yet implemented] Stage 4 -- detailed iSE data
+        │
+        ▼ [optional, any time after Stage 1]
+Stage 5  pipeline.preview_cycle(cycle)
+  → plot_utils.build_segments() + draw_cycle_figure() for one cycle,
+    shown in an interactive Toplevel window
+        │
+        ▼
+Stage 6  pipeline.generate_outputs()
+  For each cycle:
+    plot_utils.build_segments(...)      → {phase_name: [(t, P), ...]}
+    plot_utils.draw_cycle_figure(...)   → matplotlib Figure
+    plot_utils.save_cycle_figure(...)   → cycle_NNNN.png
+        │
+        ▼
+  plot_utils.compute_exposure_table(all_cycles, ...)
+    → list of per-cycle metric rows
+        │
+        ▼
+  plot_utils.save_exposure_csv(rows, out_dir, stem)
+    → {stem}_exposure.csv
+        │
+        ▼ [optional]
+  ise_utils.save_ise_thickness_csv(...)
+    → {stem}_thickness.csv
+        │
+        ▼
+  plot_utils.build_animation(cycles, out_dir, fps, dpi)
   → {stem}_animation.gif
 ```
 

@@ -3,16 +3,17 @@ gui.py
 ------
 Tkinter GUI for the Reactor Pressure Analyzer.
 
-Imports the three pure-logic modules and wires them to the UI:
+Wires the UI to the processing pipeline:
     sequence_utils  -- valve sequence / phase-bin helpers
     data_parser     -- streaming NDJSON file reader
     plot_utils      -- figure building and saving
+    pipeline        -- staged processing pipeline (condense, label phases,
+                        attach temperature, preview, generate outputs)
 """
 
 import tkinter as tk
 from tkinter import ttk, filedialog, scrolledtext, messagebox
 import threading
-from concurrent.futures import ThreadPoolExecutor
 import os
 import re
 import json
@@ -25,33 +26,11 @@ from zoneinfo import ZoneInfo
 
 import matplotlib
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 
-from sequence_utils import (
-    convert_sequence,
-    apply_valve_names,
-    compute_phase_bins,
-    make_cycle_seq_map,
-    assign_phase,
-    build_phase_color_map,
-)
-from data_parser import (
-    read_header, stream_pressure, subtract_baseline,
-    condense_log, condensed_path, is_condensed_file,
-    load_temperature_data, temperature_zones, load_service_config_data,
-)
-from plot_utils  import (
-    build_segments,
-    draw_cycle_figure,
-    compute_leakrate_regressions,
-    save_cycle_figure,
-    compute_axis_limits,
-    compute_exposure_table,
-    save_exposure_csv,
-    build_animation,
-)
-from ise_utils import save_ise_thickness_csv
+from sequence_utils import convert_sequence
+from data_parser import read_header, temperature_zones, load_temperature_data
+from pipeline import ReactorPipeline, ProcessingOptions
 from convert_to_json import load_table, build_payload, save_payload, validate_recipe_sheet, build_output_filename_report
 from header_editor import open_header_editor
 from header_text import (
@@ -117,7 +96,7 @@ class ReactorApp(tk.Tk):
         self._valve_name_vars: dict = {}   # {valve_num_int: tk.StringVar}
         self._valve_name_entries: dict = {} # {valve_num_int: ttk.Entry}
         self._wait_entry = None
-        self._cached:          dict = {}   # populated after a processing run
+        self._pipeline: ReactorPipeline | None = None   # staged processing pipeline
         self._recipe_payload:  dict = {}
         self._reactor_type: str | None = None
         settings_dir = Path(__file__).parent
@@ -205,7 +184,7 @@ class ReactorApp(tk.Tk):
         ).pack(side="left", padx=(8, 0))
 
         # -- Temperature source -----------------------------------------------
-        temp_frame = ttk.LabelFrame(parent, text="Temperature Data", padding=8)
+        temp_frame = ttk.LabelFrame(parent, text="3. Temperature Data (optional)", padding=8)
         temp_frame.pack(fill="x", **pad)
         ttk.Checkbutton(
             temp_frame, text="Add temperature data to condensed payload",
@@ -243,7 +222,11 @@ class ReactorApp(tk.Tk):
         self._refresh_temperature_source()
 
         # -- iSE thickness source file ----------------------------------------
-        ise_frame = ttk.LabelFrame(parent, text="iSE Data File", padding=8)
+        ise_frame = ttk.LabelFrame(
+            parent,
+            text="4. iSE Data File (simple thickness CSV only -- detailed iSE integration coming soon)",
+            padding=8,
+        )
         ise_frame.pack(fill="x", **pad)
         ttk.Entry(ise_frame, textvariable=self._ise_file_path, width=54).pack(
             side="left", expand=True, fill="x", padx=(0, 4))
@@ -317,37 +300,56 @@ class ReactorApp(tk.Tk):
             variable=self._write_condensed_json_var,
         ).grid(row=9, column=0, columnspan=3, sticky="w", padx=3, pady=(6, 0))
 
-        # -- Process button + progress bar -------------------------------------
-        ctrl = ttk.Frame(parent)
-        ctrl.pack(fill="x", padx=10, pady=6)
-        self._process_btn = ttk.Button(
-            ctrl, text="Process & Generate Plots",
-            command=self._start_processing, state="disabled")
-        self._process_btn.pack(side="left", padx=(0, 8))
+        # -- Run All (one-click condense + label + temperature + plots + animation) --
+        run_all_row = ttk.Frame(parent)
+        run_all_row.pack(fill="x", padx=10, pady=(6, 0))
+        self._run_all_btn = ttk.Button(
+            run_all_row, text="Run All (Condense -> Plots -> Animation)",
+            command=self._start_run_all, state="disabled")
+        self._run_all_btn.pack(side="left", padx=(0, 8))
         self._progress = ttk.Progressbar(
-            ctrl, orient="horizontal", mode="determinate", length=1)
+            run_all_row, orient="horizontal", mode="determinate", length=1)
         self._progress.pack(side="left", expand=True, fill="x")
-        self._pct_lbl = ttk.Label(ctrl, text="  0%", width=5)
+        self._pct_lbl = ttk.Label(run_all_row, text="  0%", width=5)
         self._pct_lbl.pack(side="left")
 
-        # -- Animation button -------------------------------------------------
-        anim_row = ttk.Frame(parent)
-        anim_row.pack(fill="x", padx=10, pady=(0, 4))
-        self._anim_btn = ttk.Button(
-            anim_row, text="Generate Animation",
-            command=self._start_animation, state="disabled")
-        self._anim_btn.pack(side="left")
+        # -- Staged processing buttons -----------------------------------------
+        steps_frame = ttk.LabelFrame(parent, text="Or run each step individually", padding=8)
+        steps_frame.pack(fill="x", padx=10, pady=(6, 0))
+
+        self._condense_btn = ttk.Button(
+            steps_frame, text="1. Condense Data",
+            command=self._start_condense, state="disabled")
+        self._condense_btn.grid(row=0, column=0, padx=(0, 6), pady=2, sticky="w")
+
+        self._label_btn = ttk.Button(
+            steps_frame, text="2. Label Sequences & Phases",
+            command=self._start_label_phases, state="disabled")
+        self._label_btn.grid(row=0, column=1, padx=6, pady=2, sticky="w")
+
+        self._attach_temp_btn = ttk.Button(
+            steps_frame, text="3. Attach Temperature Data (optional)",
+            command=self._start_attach_temperature, state="disabled")
+        self._attach_temp_btn.grid(row=0, column=2, padx=6, pady=2, sticky="w")
 
         # -- Preview controls -------------------------------------------------
         prev_row = ttk.Frame(parent)
-        prev_row.pack(fill="x", padx=10, pady=(0, 4))
-        ttk.Label(prev_row, text="Preview cycle:").pack(side="left", padx=(0, 4))
+        prev_row.pack(fill="x", padx=10, pady=(6, 4))
+        ttk.Label(prev_row, text="5. Preview cycle:").pack(side="left", padx=(0, 4))
         ttk.Entry(prev_row, textvariable=self._preview_cycle_var,
                   width=6).pack(side="left", padx=(0, 8))
         self._preview_btn = ttk.Button(
             prev_row, text="Preview Plot",
             command=self._preview_plot, state="disabled")
         self._preview_btn.pack(side="left")
+
+        # -- Generate plots + animation button ---------------------------------
+        ctrl = ttk.Frame(parent)
+        ctrl.pack(fill="x", padx=10, pady=6)
+        self._generate_btn = ttk.Button(
+            ctrl, text="6. Generate Plots & Animation",
+            command=self._start_generate_outputs, state="disabled")
+        self._generate_btn.pack(side="left", padx=(0, 8))
 
         # -- Log ---------------------------------------------------------------
         log_frame = ttk.LabelFrame(parent, text="Log", padding=6)
@@ -1522,7 +1524,14 @@ class ReactorApp(tk.Tk):
         self._apply_saved_valve_names()
         self._apply_detail_valve_names(self._header_info.get("experimentalDetails", ""))
         self._apply_detail_wait_time(self._header_info.get("experimentalDetails", ""))
-        self._process_btn.config(state="normal")
+        if self._pipeline is not None:
+            self._pipeline.cleanup()
+        self._pipeline = None
+        self._condense_btn.config(state="normal")
+        self._run_all_btn.config(state="normal")
+        self._label_btn.config(state="disabled")
+        self._attach_temp_btn.config(state="disabled")
+        self._generate_btn.config(state="disabled")
         self._preview_btn.config(state="normal")
         self._edit_header_btn.config(state="normal")
 
@@ -1671,441 +1680,247 @@ class ReactorApp(tk.Tk):
             self._valve_name_entries[vnum] = entry
 
     # =========================================================================
-    #  Processing
+    #  Processing pipeline (see pipeline.py for the staged implementation)
     # =========================================================================
 
-    def _start_processing(self):
-        path    = self._file_path.get().strip()
-        out_dir = self._output_dir.get().strip()
-        if not path or not os.path.isfile(path):
-            self._log("ERROR: Invalid data file.")
-            return
-        if not out_dir:
-            self._log("ERROR: No output directory specified.")
-            return
-
+    def _build_processing_options(self) -> ProcessingOptions | None:
+        """
+        Collect current UI values into a ProcessingOptions.
+        Returns None (after logging an error) if a value is invalid.
+        """
         valve_names = {vnum: var.get() for vnum, var in self._valve_name_vars.items()}
-        xlim        = self._get_float(self._xlim_var)
-        ylim        = self._get_float(self._ylim_var)
+        xlim = self._get_float(self._xlim_var)
+        ylim = self._get_float(self._ylim_var)
         grid_x_spacing = self._get_float(self._grid_x_spacing_var)
         grid_y_spacing = self._get_float(self._grid_y_spacing_var)
         if grid_x_spacing is not None and grid_x_spacing <= 0:
             self._log("ERROR: X grid spacing must be greater than zero.")
-            return
+            return None
         if grid_y_spacing is not None and grid_y_spacing <= 0:
             self._log("ERROR: Y grid spacing must be greater than zero.")
-            return
-        shift       = self._get_float(self._shift_var)
-        wait_time   = self._get_float(self._wait_var)
+            return None
+        shift = self._get_float(self._shift_var) or 0.0
+        wait_time = self._get_float(self._wait_var) or 0.0
         leakrate_phase_reduction = max(
-            0.0,
-            self._get_float(self._leakrate_phase_reduction_var),
+            0.0, self._get_float(self._leakrate_phase_reduction_var) or 0.0
         )
-        write_condensed_json = self._write_condensed_json_var.get()
-        add_temperature = self._add_temperature_var.get()
-        temperature_source = self._temperature_source_path()
-        selected_temperature_zones = [
-            zone for zone, var in self._temperature_zones_vars.items() if var.get()
-        ]
+        try:
+            thickness_blank_rows = max(0, int(self._thickness_blank_rows_var.get().strip() or "0"))
+        except ValueError:
+            thickness_blank_rows = 0
+        fps = self._get_float(self._fps_var) or 5.0
+
+        details_payload = self._parse_experimental_details_payload(
+            self._header_info.get("experimentalDetails", "")
+        )
+        if isinstance(details_payload, dict):
+            valve_names = self._effective_valve_names(valve_names, details_payload)
 
         self._persist_processing_preferences(valve_names)
 
-        self._process_btn.config(state="disabled")
-        self._preview_btn.config(state="disabled")
+        return ProcessingOptions(
+            valve_names=valve_names,
+            xlim=xlim,
+            ylim=ylim,
+            grid_x=self._grid_x_var.get(),
+            grid_y=self._grid_y_var.get(),
+            grid_x_spacing=grid_x_spacing,
+            grid_y_spacing=grid_y_spacing,
+            shift=shift,
+            wait_time=wait_time,
+            leakrate_phase_reduction=leakrate_phase_reduction,
+            write_condensed_json=self._write_condensed_json_var.get(),
+            add_temperature=self._add_temperature_var.get(),
+            temperature_source=self._temperature_source_path(),
+            selected_temperature_zones=[
+                zone for zone, var in self._temperature_zones_vars.items() if var.get()
+            ],
+            ise_file_path=self._ise_file_path.get().strip(),
+            thickness_blank_rows=thickness_blank_rows,
+            fps=fps,
+        )
+
+    def _ensure_pipeline(self) -> ReactorPipeline | None:
+        """Create (or refresh) the staged ReactorPipeline for the current raw file."""
+        path = self._file_path.get().strip()
+        out_dir = self._output_dir.get().strip()
+        if not path or not os.path.isfile(path):
+            self._log("ERROR: Invalid data file.")
+            return None
+        if not out_dir:
+            self._log("ERROR: No output directory specified.")
+            return None
+
+        options = self._build_processing_options()
+        if options is None:
+            return None
+
+        details_payload = self._parse_experimental_details_payload(
+            self._header_info.get("experimentalDetails", "")
+        )
+
+        def _sequence_note_fn(seq_key, phased_seq):
+            return self._sequence_note_text(seq_key or "", phased_seq, details_payload)
+
+        if self._pipeline is None or self._pipeline.raw_path != Path(path):
+            if self._pipeline is not None:
+                self._pipeline.cleanup()
+            self._pipeline = ReactorPipeline(
+                path, out_dir, self._seq_dict, options,
+                sequence_note_fn=_sequence_note_fn,
+                save_fn=self._run_save_with_retry,
+            )
+        else:
+            self._pipeline.options = options
+            self._pipeline.out_dir = out_dir
+            self._pipeline.update_recipe(self._seq_dict)
+            self._pipeline.update_sequence_note_fn(_sequence_note_fn)
+
+        self._append_valve_name_log(path, options.valve_names)
+        return self._pipeline
+
+    def _set_step_buttons_state(self, state: str):
+        self._condense_btn.config(state=state)
+        self._label_btn.config(state=state)
+        self._attach_temp_btn.config(state=state)
+        self._generate_btn.config(state=state)
+        self._run_all_btn.config(state=state)
+        self._preview_btn.config(state=state)
+
+    def _finish_processing_ui(self):
+        """Re-enable the always-available buttons, plus the downstream step
+        buttons once Condense has run at least once."""
+        def _re_enable():
+            self._condense_btn.config(state="normal")
+            self._run_all_btn.config(state="normal")
+            self._preview_btn.config(state="normal")
+            downstream_state = (
+                "normal" if self._pipeline is not None and self._pipeline.stage != "none"
+                else "disabled"
+            )
+            self._label_btn.config(state=downstream_state)
+            self._attach_temp_btn.config(state=downstream_state)
+            self._generate_btn.config(state=downstream_state)
+        self.after(0, _re_enable)
+
+    # -- Step 1: Condense ----------------------------------------------------
+
+    def _start_condense(self):
+        pipeline = self._ensure_pipeline()
+        if pipeline is None:
+            return
+        self._set_step_buttons_state("disabled")
         self._set_progress(0)
+        threading.Thread(target=self._run_condense, daemon=True).start()
 
-        threading.Thread(
-            target=self._run_processing,
-            args=(
-                path,
-                out_dir,
-                valve_names,
-                xlim,
-                ylim,
-                self._grid_x_var.get(),
-                self._grid_y_var.get(),
-                grid_x_spacing,
-                grid_y_spacing,
-                shift,
-                wait_time,
-                leakrate_phase_reduction,
-                write_condensed_json,
-                add_temperature,
-                temperature_source,
-                selected_temperature_zones,
-            ),
-            daemon=True,
-        ).start()
-
-    def _run_processing(
-        self,
-        path,
-        out_dir,
-        valve_names,
-        xlim,
-        ylim,
-        grid_x,
-        grid_y,
-        grid_x_spacing,
-        grid_y_spacing,
-        shift,
-        wait_time,
-        leakrate_phase_reduction,
-        write_condensed_json,
-        add_temperature,
-        temperature_source,
-        selected_temperature_zones,
-    ):
-        """Worker function — runs in a background thread."""
+    def _run_condense(self):
         try:
-            self._log(f"\n-- {Path(path).name}")
-            if wait_time > 0:
-                self._log(f"   Trimming first {wait_time:.0f} s (wait time)")
-            os.makedirs(out_dir, exist_ok=True)
-
-            # -- Build phase structure from header --------------------------------
-            named_seq   = apply_valve_names(self._seq_dict, valve_names)
-            phased_seq  = compute_phase_bins(named_seq, shift=shift)
-            cyc_seq_map = make_cycle_seq_map(phased_seq)
-            details_payload = self._parse_experimental_details_payload(
-                self._header_info.get("experimentalDetails", "")
-            )
-            if isinstance(details_payload, dict):
-                valve_names = self._effective_valve_names(valve_names, details_payload)
-                named_seq = apply_valve_names(self._seq_dict, valve_names)
-                phased_seq = compute_phase_bins(named_seq, shift=shift)
-                cyc_seq_map = make_cycle_seq_map(phased_seq)
-                valve_name_payload = self._recipe_valve_name_payload(valve_names)
-                if valve_name_payload:
-                    details_payload = dict(details_payload)
-                    details_payload["ValveNames"] = valve_name_payload
-
-            self._append_valve_name_log(path, valve_names)
-
-            for sk, sd in phased_seq.items():
-                self._log(f"  {sk} bins (s): {sd.get('phase_bins', [])}")
-                self._log(f"  {sk} phases  : {sd.get('phase_names', [])}")
-
-            # -- Stream-parse the file --------------------------------------------
-            self._log("Reading data...")
-
-            def _prog(br, fs):
-                self._set_progress(br / fs * 55)
-
-            cycle_points, cycle_start_map = stream_pressure(
-                path, wait_time=wait_time, progress_cb=_prog)
-
-            self._set_progress(55)
-            self._log(f"  {len(cycle_points)} cycles, "
-                      f"{sum(len(v) for v in cycle_points.values()):,} pressure points")
-
-            condensed_future = None
-            if write_condensed_json:
-                # -- Write condensed log -----------------------------------------
-                is_input_condensed = is_condensed_file(path)
-                cpath = Path(path) if is_input_condensed else condensed_path(path)
-                self._log("Writing condensed log...")
-                condensed_executor = ThreadPoolExecutor(max_workers=1)
-                try:
-                    condensed_out = str(cpath)
-
-                    def _fmt_bytes(nbytes: int) -> str:
-                        units = ["B", "KB", "MB", "GB", "TB"]
-                        size = float(max(nbytes, 0))
-                        idx = 0
-                        while size >= 1024.0 and idx < len(units) - 1:
-                            size /= 1024.0
-                            idx += 1
-                        return f"{size:.2f} {units[idx]}"
-
-                    def _format_phase_for_step(phase_name: str) -> str:
-                        parts = phase_name.split("_")
-                        if parts:
-                            parts[-1] = parts[-1].capitalize()
-                        return "_".join(parts)
-
-                    def _phase_lookup(cycle, time_s, raw_step, payload):
-                        seq_key = cyc_seq_map.get(cycle)
-                        if not seq_key:
-                            return None
-                        bins = phased_seq.get(seq_key, {}).get("phase_bins", [])
-                        names = phased_seq.get(seq_key, {}).get("phase_names", [])
-                        if not bins or not names:
-                            return None
-                        t0 = cycle_start_map.get(cycle)
-                        if t0 is None:
-                            return None
-                        phase = assign_phase(time_s - t0, bins, names)
-                        if not phase:
-                            return None
-                        return _format_phase_for_step(phase)
-
-                    temperature_samples = None
-                    service_config_samples = load_service_config_data(temperature_source)
-                    if add_temperature:
-                        temperature_samples = load_temperature_data(temperature_source)
-                        self._log(
-                            f"  Loaded {len(temperature_samples):,} temperature samples"
-                        )
-                    self._log(
-                        f"  Loaded {len(service_config_samples):,} service config entries"
-                    )
-                    condensed_future = condensed_executor.submit(
-                        lambda: self._run_save_with_retry(
-                            lambda: condense_log(
-                                path,
-                                condensed_out,
-                                phase_lookup=_phase_lookup,
-                                temperature_samples=temperature_samples,
-                                temperature_zones_to_keep=selected_temperature_zones,
-                                service_config_samples=service_config_samples,
-                                return_stats=True,
-                            ),
-                            condensed_out,
-                            "condensed log",
-                        )
-                    )
-                except Exception:
-                    condensed_executor.shutdown(wait=False, cancel_futures=True)
-                    raise
-
-            # -- Baseline correction ----------------------------------------------
-            cycle_points, baseline = subtract_baseline(cycle_points)
-            self._log(f"  Baseline subtracted: {baseline:.2f} mTorr")
-
-            # -- Axis limits -------------------------------------------------------
-            max_ct, max_p = compute_axis_limits(cycle_points, cycle_start_map)
-            xlim_val = xlim if xlim else max_ct
-            ylim_val = ylim if ylim else max_p
-            stem = Path(path).stem
-            filename = stem[:-len("_condensed")] if stem.endswith("_condensed") else stem
-
-            # -- Phase color map --------------------------------------------------
-            all_phase_names: list[str] = []
-            for sd in phased_seq.values():
-                for pn in sd.get("phase_names", []):
-                    if pn not in all_phase_names:
-                        all_phase_names.append(pn)
-            phase_color_map = build_phase_color_map(all_phase_names)
-
-            # -- Batch plot generation --------------------------------------------
-            self._log("Generating plots...")
-            cycles_sorted = sorted(cycle_points.keys())
-            total         = len(cycles_sorted)
-
-            for i, cycle in enumerate(cycles_sorted):
-                seq_key = cyc_seq_map.get(cycle)
-                if seq_key is None:
-                    self._set_progress(55 + (i + 1) / total * 45)
-                    continue
-
-                segs = build_segments(
-                    cycle, cycle_points, cycle_start_map,
-                    phased_seq, cyc_seq_map, assign_phase)
-
-                fig = draw_cycle_figure(
-                    cycle, filename, segs, phase_color_map,
-                    all_phase_names, xlim_val, ylim_val,
-                    grid_x=grid_x, grid_y=grid_y,
-                    grid_x_spacing=grid_x_spacing,
-                    grid_y_spacing=grid_y_spacing,
-                    sequence_note=self._sequence_note_text(seq_key, phased_seq, details_payload),
-                )
-
-                png_path = os.path.join(out_dir, f"cycle_{cycle:04d}.png")
-                try:
-                    self._run_save_with_retry(
-                        lambda: save_cycle_figure(fig, cycle, out_dir),
-                        png_path,
-                        "PNG plot",
-                    )
-                finally:
-                    plt.close(fig)
-
-                self._set_progress(55 + (i + 1) / total * 45)
-
-            self._set_progress(100)
-            self._log(f"\nDone -- {total} plots saved to:\n  {out_dir}")
-
-            try:
-                stats = condensed_future.result() if condensed_future is not None else None
-                if stats is not None:
-                    self._log(
-                        f"  Raw rows before condense: {stats['total_rows']:,} total, "
-                        f"{stats['pressure_rows']:,} pressure"
-                    )
-                    self._log(
-                        f"  File size: {_fmt_bytes(stats['input_size_bytes'])} -> "
-                        f"{_fmt_bytes(stats['output_size_bytes'])} "
-                        f"({stats['size_reduction_pct']:.1f}% reduction)"
-                    )
-                    self._log(
-                        f"  Condensed: {Path(cpath).name}  "
-                        f"({stats['rows_written']:,} data rows)"
-                    )
-            except SaveAbortedError:
-                self._log("  Condensed log save cancelled.")
-            except Exception as exc:
-                self._log(f"  WARNING: could not write condensed log: {exc}")
-
-            # -- Exposure CSV -----------------------------------------------------
-            self._log("Computing phase exposures...")
-            if leakrate_phase_reduction > 0:
-                self._log(
-                    f"  LeakRate phase reduction: {leakrate_phase_reduction:.3f} s on each side"
-                )
-            exp_rows = compute_exposure_table(
-                cycles_sorted, cycle_points, cycle_start_map,
-                phased_seq, cyc_seq_map, assign_phase,
-                leakrate_phase_reduction=leakrate_phase_reduction,
-            )
-            csv_path = os.path.join(out_dir, f"{filename}_exposure.csv")
-            self._run_save_with_retry(
-                lambda: save_exposure_csv(exp_rows, out_dir, filename),
-                csv_path,
-                "exposure CSV",
-            )
-            self._log(f"  Exposure CSV: {Path(csv_path).name}  ({len(exp_rows)} rows)")
-
-            # -- iSE thickness CSV -----------------------------------------------
-            try:
-                ise_path = self._ise_file_path.get().strip()
-                if ise_path and Path(ise_path).is_file():
-                    ise_src = Path(ise_path)
-                    try:
-                        thickness_blank_rows = max(0, int(self._thickness_blank_rows_var.get().strip() or "0"))
-                    except ValueError:
-                        thickness_blank_rows = 0
-                    thickness_path = os.path.join(out_dir, f"{filename}_thickness.csv")
-                    n_thickness = self._run_save_with_retry(
-                        lambda: save_ise_thickness_csv(
-                            ise_src,
-                            thickness_path,
-                            blank_rows=thickness_blank_rows,
-                        ),
-                        thickness_path,
-                        "thickness CSV",
-                    )
-                    self._log(
-                        f"  Thickness CSV: {Path(thickness_path).name} "
-                        f"({n_thickness} rows from {ise_src.name})"
-                    )
-                else:
-                    self._log("  Thickness CSV: skipped (select a valid iSE data file)")
-            except SaveAbortedError:
-                self._log("  Thickness CSV save cancelled.")
-            except Exception as exc:
-                self._log(f"  WARNING: could not extract iSE thickness CSV: {exc}")
-
-            # Cache for interactive preview
-            self._cached = dict(
-                cycle_points    = cycle_points,
-                cycle_start_map = cycle_start_map,
-                phased_seq      = phased_seq,
-                cyc_seq_map     = cyc_seq_map,
-                all_phase_names = all_phase_names,
-                phase_color_map = phase_color_map,
-                xlim_val        = xlim_val,
-                ylim_val        = ylim_val,
-                grid_x           = grid_x,
-                grid_y           = grid_y,
-                grid_x_spacing   = grid_x_spacing,
-                grid_y_spacing   = grid_y_spacing,
-                filename        = filename,
-                out_dir         = out_dir,
-                experimental_details = details_payload,
-            )
+            pipeline = self._pipeline
+            self._log(f"\n-- {pipeline.raw_path.name}")
+            if pipeline.options.wait_time > 0:
+                self._log(f"   Trimming first {pipeline.options.wait_time:.0f} s (wait time)")
+            pipeline.condense(progress_cb=self._set_progress, log_cb=self._log)
         except SaveAbortedError as exc:
             self._log(f"Save cancelled: {exc}")
         except Exception as exc:
-            self._log(f"Processing ERROR: {exc}")
+            self._log(f"Condense ERROR: {exc}")
         finally:
-            try:
-                if 'condensed_executor' in locals():
-                    condensed_executor.shutdown(wait=True, cancel_futures=False)
-            except Exception:
-                pass
-            def _re_enable():
-                self._process_btn.config(state="normal")
-                self._preview_btn.config(state="normal")
-                self._anim_btn.config(state="normal")
-            self.after(0, _re_enable)
+            self._finish_processing_ui()
 
-    # =========================================================================
-    #  Animation
-    # =========================================================================
+    # -- Step 2: Label sequences & phases -------------------------------------
 
-    def _start_animation(self):
-        if not self._cached:
-            self._log("No data cached -- run processing first.")
+    def _start_label_phases(self):
+        pipeline = self._ensure_pipeline()
+        if pipeline is None:
             return
-
-        fps = self._get_float(self._fps_var)
-        if fps is None or fps <= 0:
-            self._log("ERROR: Animation FPS must be greater than zero.")
-            return
-
-        self._process_btn.config(state="disabled")
-        self._preview_btn.config(state="disabled")
-        self._anim_btn.config(state="disabled")
+        self._set_step_buttons_state("disabled")
         self._set_progress(0)
+        threading.Thread(target=self._run_label_phases, daemon=True).start()
 
-        threading.Thread(
-            target=self._run_animation,
-            args=(fps,),
-            daemon=True,
-        ).start()
-
-    def _run_animation(self, fps: float):
-        """Worker — render and save the animation GIF in a background thread."""
-        c       = self._cached
-        out_dir = c["out_dir"]
-        n       = len(c["cycle_points"])
-        self._log(f"\nGenerating animation ({n} frames @ {fps:.0f} fps)...")
-
-        def _prog(done, total):
-            self._set_progress(done / total * 100)
-
+    def _run_label_phases(self):
         try:
-            out_path = os.path.join(out_dir, f"{c['filename']}_animation.gif")
-            self._run_save_with_retry(
-                lambda: build_animation(
-                    sorted(c["cycle_points"].keys()),
-                    c["cycle_points"],
-                    c["cycle_start_map"],
-                    c["phased_seq"],
-                    c["cyc_seq_map"],
-                    c["all_phase_names"],
-                    c["phase_color_map"],
-                    assign_phase,
-                    c["xlim_val"],
-                    c["ylim_val"],
-                    c["filename"],
-                    out_dir,
-                    sequence_note_fn=lambda cycle, seq_key: self._sequence_note_text(seq_key or "", c["phased_seq"], c.get("experimental_details", {})),
-                    fps=max(1, int(fps)),
-                    progress_cb=_prog,
-                ),
-                out_path,
-                "animation GIF",
-            )
-            self._log(f"Animation saved: {Path(out_path).name}")
+            self._pipeline.label_phases(log_cb=self._log)
+            self._set_progress(100)
+        except SaveAbortedError as exc:
+            self._log(f"Save cancelled: {exc}")
+        except Exception as exc:
+            self._log(f"Label phases ERROR: {exc}")
+        finally:
+            self._finish_processing_ui()
+
+    # -- Step 3: Attach temperature data (optional) ---------------------------
+
+    def _start_attach_temperature(self):
+        pipeline = self._ensure_pipeline()
+        if pipeline is None:
+            return
+        self._set_step_buttons_state("disabled")
+        self._set_progress(0)
+        threading.Thread(target=self._run_attach_temperature, daemon=True).start()
+
+    def _run_attach_temperature(self):
+        try:
+            self._pipeline.attach_temperature(progress_cb=self._set_progress, log_cb=self._log)
+        except SaveAbortedError as exc:
+            self._log(f"Save cancelled: {exc}")
+        except Exception as exc:
+            self._log(f"Attach temperature ERROR: {exc}")
+        finally:
+            self._finish_processing_ui()
+
+    # -- Step 6: Generate plots & animation -----------------------------------
+
+    def _start_generate_outputs(self):
+        pipeline = self._ensure_pipeline()
+        if pipeline is None:
+            return
+        self._set_step_buttons_state("disabled")
+        self._set_progress(0)
+        threading.Thread(target=self._run_generate_outputs, daemon=True).start()
+
+    def _run_generate_outputs(self):
+        try:
+            self._pipeline.generate_outputs(progress_cb=self._set_progress, log_cb=self._log)
+        except SaveAbortedError as exc:
+            self._log(f"Save cancelled: {exc}")
         except ImportError:
             self._log(
                 "ERROR: Pillow is required for animations.\n"
                 "  Run:  .venv\\Scripts\\pip install Pillow"
             )
-        except SaveAbortedError as exc:
-            self._log(f"Animation save cancelled: {exc}")
-        except Exception as e:
-            self._log(f"Animation ERROR: {e}")
+        except Exception as exc:
+            self._log(f"Generate outputs ERROR: {exc}")
         finally:
-            self._set_progress(100)
-            def _re_enable():
-                self._process_btn.config(state="normal")
-                self._preview_btn.config(state="normal")
-                self._anim_btn.config(state="normal")
-            self.after(0, _re_enable)
+            self._finish_processing_ui()
+
+    # -- Run All: condense -> label -> (temperature) -> generate --------------
+
+    def _start_run_all(self):
+        pipeline = self._ensure_pipeline()
+        if pipeline is None:
+            return
+        self._set_step_buttons_state("disabled")
+        self._set_progress(0)
+        threading.Thread(target=self._run_run_all, daemon=True).start()
+
+    def _run_run_all(self):
+        try:
+            pipeline = self._pipeline
+            self._log(f"\n-- {pipeline.raw_path.name}")
+            if pipeline.options.wait_time > 0:
+                self._log(f"   Trimming first {pipeline.options.wait_time:.0f} s (wait time)")
+            pipeline.run_all(progress_cb=self._set_progress, log_cb=self._log)
+        except SaveAbortedError as exc:
+            self._log(f"Save cancelled: {exc}")
+        except ImportError:
+            self._log(
+                "ERROR: Pillow is required for animations.\n"
+                "  Run:  .venv\\Scripts\\pip install Pillow"
+            )
+        except Exception as exc:
+            self._log(f"Processing ERROR: {exc}")
+        finally:
+            self._finish_processing_ui()
 
     # =========================================================================
     #  Interactive preview
@@ -2123,120 +1938,26 @@ class ReactorApp(tk.Tk):
             self._log("ERROR: Preview cycle must be an integer.")
             return
 
-        wait_time = self._get_float(self._wait_var) or 0.0
-        xlim = self._get_float(self._xlim_var)
-        ylim = self._get_float(self._ylim_var)
-        grid_x_spacing = self._get_float(self._grid_x_spacing_var)
-        grid_y_spacing = self._get_float(self._grid_y_spacing_var)
-        leakrate_phase_reduction = max(
-            0.0,
-            self._get_float(self._leakrate_phase_reduction_var),
-        )
-        if grid_x_spacing is not None and grid_x_spacing <= 0:
-            self._log("ERROR: X grid spacing must be greater than zero.")
-            return
-        if grid_y_spacing is not None and grid_y_spacing <= 0:
-            self._log("ERROR: Y grid spacing must be greater than zero.")
+        pipeline = self._ensure_pipeline()
+        if pipeline is None:
             return
 
-        self._process_btn.config(state="disabled")
-        self._preview_btn.config(state="disabled")
+        self._set_step_buttons_state("disabled")
         self._set_progress(0)
-        threading.Thread(
-            target=self._run_preview,
-            args=(
-                path, cycle, xlim, ylim,
-                self._grid_x_var.get(), self._grid_y_var.get(),
-                grid_x_spacing, grid_y_spacing, wait_time,
-                leakrate_phase_reduction,
-            ),
-            daemon=True,
-        ).start()
+        threading.Thread(target=self._run_preview, args=(cycle,), daemon=True).start()
 
-    def _run_preview(
-        self, path, cycle, xlim, ylim, grid_x, grid_y,
-        grid_x_spacing, grid_y_spacing, wait_time, leakrate_phase_reduction,
-    ):
+    def _run_preview(self, cycle: int):
         try:
-            valve_names = {vnum: var.get() for vnum, var in self._valve_name_vars.items()}
-            named_seq = apply_valve_names(self._seq_dict, valve_names)
-            shift = self._get_float(self._shift_var) or 0.0
-            unshifted_seq = compute_phase_bins(named_seq, shift=0.0)
-            phased_seq = compute_phase_bins(named_seq, shift=shift)
-            cyc_seq_map = make_cycle_seq_map(phased_seq)
-            details_payload = self._parse_experimental_details_payload(
-                self._header_info.get("experimentalDetails", "")
+            pipeline = self._pipeline
+            fig = pipeline.preview_cycle(cycle, progress_cb=self._set_progress, log_cb=self._log)
+            self.after(
+                0,
+                lambda: self._open_preview_window(fig, cycle, [cycle], pipeline.filename),
             )
-            if isinstance(details_payload, dict):
-                valve_names = self._effective_valve_names(valve_names, details_payload)
-                named_seq = apply_valve_names(self._seq_dict, valve_names)
-                unshifted_seq = compute_phase_bins(named_seq, shift=0.0)
-                phased_seq = compute_phase_bins(named_seq, shift=shift)
-                cyc_seq_map = make_cycle_seq_map(phased_seq)
-
-            self._log(f"Preview: reading cycle {cycle}...")
-
-            def _prog(bytes_read, file_size):
-                self._set_progress(bytes_read / file_size * 85)
-
-            cycle_points, cycle_start_map = stream_pressure(
-                path,
-                wait_time=wait_time,
-                progress_cb=_prog,
-                target_cycle=cycle,
-            )
-            if cycle not in cycle_points:
-                self._log(f"ERROR: Cycle {cycle} not found in the raw data.")
-                return
-
-            cycle_points, baseline = subtract_baseline(cycle_points)
-            max_ct, max_p = compute_axis_limits(cycle_points, cycle_start_map)
-            xlim_val = xlim if xlim else max_ct
-            ylim_val = ylim if ylim else max_p
-            all_phase_names = []
-            for sequence_data in phased_seq.values():
-                for phase_name in sequence_data.get("phase_names", []):
-                    if phase_name not in all_phase_names:
-                        all_phase_names.append(phase_name)
-            phase_color_map = build_phase_color_map(all_phase_names)
-            filename = Path(path).stem
-            if filename.endswith("_condensed"):
-                filename = filename[:-len("_condensed")]
-
-            segs = build_segments(
-                cycle, cycle_points, cycle_start_map,
-                phased_seq, cyc_seq_map, assign_phase,
-            )
-            leakrate_regressions = compute_leakrate_regressions(
-                cycle, cycle_points, cycle_start_map,
-                phased_seq, cyc_seq_map, assign_phase,
-                leakrate_phase_reduction,
-            )
-            fig = draw_cycle_figure(
-                cycle, filename, segs, phase_color_map, all_phase_names,
-                xlim_val, ylim_val,
-                grid_x=grid_x, grid_y=grid_y,
-                grid_x_spacing=grid_x_spacing,
-                grid_y_spacing=grid_y_spacing,
-                phase_background=unshifted_seq.get(
-                    cyc_seq_map.get(cycle), {}
-                ),
-                leakrate_regressions=leakrate_regressions,
-                sequence_note=self._sequence_note_text(
-                    cyc_seq_map.get(cycle, ""), phased_seq, details_payload,
-                ),
-                figsize=(10, 7),
-            )
-            self._set_progress(100)
-            self.after(0, lambda: self._open_preview_window(fig, cycle, [cycle], filename))
-            self._log(f"Preview ready: cycle {cycle} ({len(cycle_points[cycle]):,} points, baseline {baseline:.2f} mTorr).")
         except Exception as exc:
             self._log(f"Preview ERROR: {exc}")
         finally:
-            def _re_enable():
-                self._process_btn.config(state="normal")
-                self._preview_btn.config(state="normal")
-            self.after(0, _re_enable)
+            self._finish_processing_ui()
 
     def _open_preview_window(self, fig, cycle: int,
                              cycles_sorted: list, filename: str):

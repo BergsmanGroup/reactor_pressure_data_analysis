@@ -469,13 +469,16 @@ def condense_log(
                         else:
                             current_step = raw_step
 
-                        merged = {
-                            "TimeElapsed": pl.get("TimeElapsed", ""),
-                            "CurrentCycle": pl.get("CurrentCycle", ""),
-                            "CurrentStep": current_step,
-                            "Pressure": pl.get("Pressure", ""),
-                            "GUID": pl.get("GUID", ""),
-                        }
+                        # When re-processing an already-condensed "data" row (a later
+                        # pipeline pass), start from its existing fields so values
+                        # baked in by an earlier pass (e.g. TemperatureZones) survive
+                        # a pass that doesn't recompute them.
+                        merged = dict(pl) if rtype == "data" else {}
+                        merged["TimeElapsed"]  = pl.get("TimeElapsed", "")
+                        merged["CurrentCycle"] = pl.get("CurrentCycle", "")
+                        merged["CurrentStep"]  = current_step
+                        merged["Pressure"]     = pl.get("Pressure", "")
+                        merged["GUID"]         = pl.get("GUID", "")
                         if temperature_samples:
                             try:
                                 absolute_timestamp = (
@@ -495,6 +498,8 @@ def condense_log(
                                     merged["TemperatureZones"] = temperatures
                             except (TypeError, ValueError):
                                 pass
+
+                        previous_meta = obj.get("meta", "") if rtype == "data" else ""
                         if service_config_samples:
                             try:
                                 absolute_timestamp = (
@@ -509,11 +514,11 @@ def condense_log(
                                         "temperature": config_metadata
                                     }
                                 else:
-                                    data_row_meta = ""
+                                    data_row_meta = previous_meta
                             except (TypeError, ValueError):
-                                data_row_meta = ""
+                                data_row_meta = previous_meta
                         else:
-                            data_row_meta = ""
+                            data_row_meta = previous_meta
                         data_row = {
                             "type": "data",
                             "meta": data_row_meta,
