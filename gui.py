@@ -29,7 +29,7 @@ matplotlib.use("Agg")
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 
 from sequence_utils import convert_sequence
-from data_parser import read_header, temperature_zones, load_temperature_data
+from data_parser import read_header, temperature_zones, load_temperature_data, detect_sample_interval_s
 from pipeline import ReactorPipeline, ProcessingOptions
 from convert_to_json import load_table, build_payload, save_payload, validate_recipe_sheet, build_output_filename_report
 from header_editor import open_header_editor
@@ -81,6 +81,8 @@ class ReactorApp(tk.Tk):
         )
         self._temperature_file_var = tk.StringVar()
         self._temperature_zones_vars: dict[str, tk.BooleanVar] = {}
+        self._temperature_sample_interval_var = tk.StringVar()
+        self._temperature_detected_interval_var = tk.StringVar(value="")
         self._exclude_falsey_edr_tags_var = tk.BooleanVar(value=False)
         self._ise_file_path     = tk.StringVar()
         self._recipe_sheet_path = tk.StringVar()
@@ -218,13 +220,22 @@ class ReactorApp(tk.Tk):
         self._temperature_zones_frame = ttk.Frame(temp_frame)
         self._temperature_zones_frame.grid(
             row=3, column=1, columnspan=3, sticky="w", pady=(5, 0))
+        ttk.Label(temp_frame, text="Effective sample interval (s):").grid(
+            row=4, column=0, sticky="w", pady=(5, 0))
+        ttk.Entry(
+            temp_frame, textvariable=self._temperature_sample_interval_var, width=10,
+        ).grid(row=4, column=1, sticky="w", pady=(5, 0))
+        ttk.Label(
+            temp_frame, textvariable=self._temperature_detected_interval_var,
+        ).grid(row=4, column=2, columnspan=2, sticky="w", pady=(5, 0))
         temp_frame.columnconfigure(1, weight=1)
         self._refresh_temperature_source()
 
         # -- iSE thickness source file ----------------------------------------
         ise_frame = ttk.LabelFrame(
             parent,
-            text="4. iSE Data File (simple thickness CSV only -- detailed iSE integration coming soon)",
+            text="4. iSE Data File (thickness CSV; cycle-aligned Cycle/Thickness "
+                 "columns also feed per-cycle summaries in step 6)",
             padding=8,
         )
         ise_frame.pack(fill="x", **pad)
@@ -1222,17 +1233,24 @@ class ReactorApp(tk.Tk):
         for child in self._temperature_zones_frame.winfo_children():
             child.destroy()
         self._temperature_zones_vars.clear()
+        self._temperature_detected_interval_var.set("")
         if not self._add_temperature_var.get():
             return
         source = self._temperature_source_path()
         if not source:
             return
         try:
-            zones = temperature_zones(load_temperature_data(source))
+            samples = load_temperature_data(source)
+            zones = temperature_zones(samples)
         except (OSError, ValueError) as exc:
             if hasattr(self, "_log_box"):
                 self._log(f"Temperature data warning: {exc}")
             return
+        detected_interval = detect_sample_interval_s(samples)
+        if detected_interval:
+            self._temperature_detected_interval_var.set(
+                f"(detected: {detected_interval:.1f}s; blank = use all samples)"
+            )
         for index, zone in enumerate(zones):
             var = tk.BooleanVar(value=True)
             self._temperature_zones_vars[zone] = var
@@ -1718,6 +1736,8 @@ class ReactorApp(tk.Tk):
 
         self._persist_processing_preferences(valve_names)
 
+        temperature_interval = self._get_float(self._temperature_sample_interval_var)
+
         return ProcessingOptions(
             valve_names=valve_names,
             xlim=xlim,
@@ -1735,6 +1755,7 @@ class ReactorApp(tk.Tk):
             selected_temperature_zones=[
                 zone for zone, var in self._temperature_zones_vars.items() if var.get()
             ],
+            temperature_sample_interval_s=temperature_interval,
             ise_file_path=self._ise_file_path.get().strip(),
             thickness_blank_rows=thickness_blank_rows,
             fps=fps,

@@ -90,8 +90,8 @@ One `CycleSummary` record appended **after all `data` rows for that cycle** (or 
       "DAMDPA": { "...": "..." }
     },
     "Temperature": {
-      "1": { "SetPointC": 30.0, "MeanC": 30.03, "StdDevC": 0.05 },
-      "2": { "SetPointC": 30.0, "MeanC": 29.99, "StdDevC": 0.04 }
+      "1": {"Name": "TDIC", "SetPointC": 30.0, "MeanC": 30.03, "StdDevC": 0.05 },
+      "2": {"Name": "DAMDPA","SetPointC": 30.0, "MeanC": 29.99, "StdDevC": 0.04 }
     },
     "Thickness": {
       "Cycle": [3.0, 3.5],
@@ -109,7 +109,7 @@ This mirrors the existing `header`/`footer`/`data` envelope convention (`{"type"
 |---|---|---|
 | `StartTime`/`EndTime`, `Sequence`, `SequenceNote` | `cycle_start_map`, `cyc_seq_map`, header sequence notes | Stage 2 (label phases) |
 | `Precursors.*` (dose/hold/exposure/mean pressure/leak rate) | `plot_utils.compute_exposure_table()` + `compute_leakrate_regressions()` — **already computed today**, just per-cycle rows in the exposure CSV instead of embedded here | Stage 6 (generate outputs), since it needs the fully parsed per-cycle pressure series |
-| `Temperature.*` (set point, mean, stdev) | New aggregation over the `TemperatureZones` already baked into `data` rows during Stage 3 | After Stage 3, but only if Stage 3 ran (optional, same as today) |
+| `Temperature.*` (name, set point, mean, stdev) | New aggregation over the `TemperatureZones` already baked into `data` rows during Stage 3 | After Stage 3, but only if Stage 3 ran (optional, same as today) |
 | `Thickness.*` | New "Stage 4" iSE loader (Section 4.4) | Stage 4 (whenever the user supplies an iSE file) |
 
 **Key implication:** `CycleSummary` can only be fully assembled once exposure/leak-rate math has run — i.e., at Stage 6 time, not interleaved mid-stream during Stage 1/2/3. So in practice it's not "a row written as each cycle is condensed" but "a batch of rows computed once per-cycle data and exposure numbers are known, then appended."

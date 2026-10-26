@@ -166,10 +166,9 @@ def load_service_config_data(source: str | Path) -> list[tuple[float, dict]]:
     return samples
 
 
-def _service_config_at(samples, timestamp):
+def _service_config_at(samples, times, timestamp):
     if not samples or timestamp is None:
         return None
-    times = [sample[0] for sample in samples]
     index = bisect_left(times, timestamp)
     if index == len(samples) or times[index] > timestamp:
         index -= 1
@@ -191,10 +190,9 @@ def _header_start_timestamp(payload: dict):
     return parsed.timestamp()
 
 
-def _temperature_at(samples, timestamp):
+def _temperature_at(samples, times, timestamp):
     if not samples or timestamp is None:
         return None
-    times = [sample[0] for sample in samples]
     index = bisect_left(times, timestamp)
     if index == 0:
         nearest = 0
@@ -203,6 +201,45 @@ def _temperature_at(samples, timestamp):
     else:
         nearest = index if times[index] - timestamp < timestamp - times[index - 1] else index - 1
     return samples[nearest][1]
+
+
+def detect_sample_interval_s(samples: list[tuple[float, dict]]) -> float | None:
+    """
+    Return the median interval (seconds) between consecutive sample
+    timestamps, or None if fewer than two samples are available. Used to
+    auto-suggest an "effective sample interval" for downsampling.
+    """
+    if len(samples) < 2:
+        return None
+    deltas = sorted(
+        b[0] - a[0] for a, b in zip(samples, samples[1:]) if b[0] > a[0]
+    )
+    if not deltas:
+        return None
+    mid = len(deltas) // 2
+    if len(deltas) % 2:
+        return deltas[mid]
+    return (deltas[mid - 1] + deltas[mid]) / 2.0
+
+
+def downsample_samples(
+    samples: list[tuple[float, dict]], interval_s: float | None
+) -> list[tuple[float, dict]]:
+    """
+    Keep only the first sample within each *interval_s*-wide time bucket.
+    Returns *samples* unchanged if *interval_s* is falsy or samples are empty.
+    Samples must already be sorted by timestamp (as returned by
+    ``load_temperature_data``/``load_service_config_data``).
+    """
+    if not interval_s or interval_s <= 0 or not samples:
+        return samples
+    kept: list[tuple[float, dict]] = []
+    next_allowed = float("-inf")
+    for sample in samples:
+        if sample[0] >= next_allowed:
+            kept.append(sample)
+            next_allowed = sample[0] + interval_s
+    return kept
 
 
 # ---------------------------------------------------------------------------
@@ -411,6 +448,15 @@ def condense_log(
         {str(zone) for zone in temperature_zones_to_keep}
         if temperature_zones_to_keep is not None else None
     )
+    # Precompute the timestamp index once -- building it per-row (as earlier
+    # revisions of this function did) turned temperature/service-config
+    # lookups into an O(rows x samples) operation instead of O(rows log samples).
+    temperature_times = (
+        [sample[0] for sample in temperature_samples] if temperature_samples else None
+    )
+    service_config_times = (
+        [sample[0] for sample in service_config_samples] if service_config_samples else None
+    )
     rows_written = 0
     bytes_read   = 0
     total_rows   = 0
@@ -428,8 +474,8 @@ def condense_log(
                     obj   = json.loads(line)
                     rtype = obj.get("type")
 
-                    # Always copy header and footer verbatim.
-                    if rtype in ("header", "footer"):
+                    # Always copy header, footer, and cycle_summary rows verbatim.
+                    if rtype in ("header", "footer", "cycle_summary"):
                         fh_out.write(line if line.endswith("\n") else line + "\n")
                         if rtype == "header":
                             header_start_timestamp = _header_start_timestamp(
@@ -486,7 +532,7 @@ def condense_log(
                                     if header_start_timestamp is not None else None
                                 )
                                 temperatures = _temperature_at(
-                                    temperature_samples, absolute_timestamp
+                                    temperature_samples, temperature_times, absolute_timestamp
                                 )
                                 if temperatures:
                                     if selected_zones is not None:
@@ -507,7 +553,7 @@ def condense_log(
                                     if header_start_timestamp is not None else None
                                 )
                                 config_metadata = _service_config_at(
-                                    service_config_samples, absolute_timestamp
+                                    service_config_samples, service_config_times, absolute_timestamp
                                 )
                                 if config_metadata is not None:
                                     data_row_meta = {
@@ -581,3 +627,101 @@ def subtract_baseline(cycle_points: dict) -> tuple[dict, float]:
         cycle_points[cyc] = [(t, p - min_p) for t, p in cycle_points[cyc]]
 
     return cycle_points, min_p
+
+
+def collect_temperature_by_cycle(
+    path: str | Path,
+    selected_zones=None,
+) -> dict[int, dict[str, dict[str, list]]]:
+    """
+    Stream a condensed NDJSON file once and collect per-cycle, per-zone
+    temperature samples already baked into each ``data`` row's
+    ``TemperatureZones`` field (written by an earlier ``attach_temperature``
+    pass). Returns ``{cycle: {zone: {"temps": [...], "setpoint": last_value}}}``.
+
+    Returns an empty dict (cheaply) if no row carries ``TemperatureZones``.
+    """
+    selected = {str(zone) for zone in selected_zones} if selected_zones else None
+    by_cycle: dict[int, dict[str, dict[str, list]]] = {}
+
+    with Path(path).open(encoding="utf-8") as fh:
+        for line in fh:
+            # Cheap pre-filter before the full JSON parse below. Works
+            # regardless of whether "payload" is stored as a nested object or
+            # (as condense_log writes it) a JSON-encoded string with escaped
+            # quotes, since we deliberately don't anchor on the quote style.
+            if "TemperatureZones" not in line:
+                continue
+            try:
+                obj = json.loads(line)
+                if obj.get("type") != "data":
+                    continue
+                pl = _parse_payload(obj.get("payload", {}))
+                zones = pl.get("TemperatureZones")
+                if not isinstance(zones, dict) or not zones:
+                    continue
+                cycle = int(pl.get("CurrentCycle", ""))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+
+            cycle_bucket = by_cycle.setdefault(cycle, {})
+            for zone, values in zones.items():
+                if selected is not None and zone not in selected:
+                    continue
+                if not isinstance(values, dict):
+                    continue
+                zone_bucket = cycle_bucket.setdefault(zone, {"temps": [], "setpoint": None})
+                temp_c = values.get("TemperatureC")
+                if isinstance(temp_c, (int, float)):
+                    zone_bucket["temps"].append(float(temp_c))
+                set_point = values.get("SetPointC")
+                if isinstance(set_point, (int, float)):
+                    zone_bucket["setpoint"] = float(set_point)
+
+    return by_cycle
+
+
+def write_cycle_summaries(path: str | Path, summaries: list[dict]) -> int:
+    """
+    Append ``cycle_summary`` rows to the condensed NDJSON file at *path*,
+    ahead of the trailing ``footer`` line if present.
+
+    Any ``cycle_summary`` rows already present are discarded first (cheap
+    prefix check, no JSON parsing), so this is safe to call repeatedly, e.g.
+    after re-running Stage 6. Only reads/rewrites the (already small)
+    condensed file once -- it does not touch the original raw log.
+    """
+    target = Path(path)
+    lines = target.read_text(encoding="utf-8").splitlines()
+
+    def _row_type(line: str) -> str | None:
+        try:
+            return json.loads(line).get("type")
+        except (json.JSONDecodeError, AttributeError):
+            return None
+
+    footer_line = None
+    if lines and '"footer"' in lines[-1] and _row_type(lines[-1]) == "footer":
+        footer_line = lines.pop()
+
+    # Cheap substring pre-filter (avoids parsing every line) before the
+    # exact type check, so re-running this only strips genuine
+    # cycle_summary rows.
+    kept_lines = [
+        line for line in lines
+        if '"cycle_summary"' not in line or _row_type(line) != "cycle_summary"
+    ]
+
+    summary_lines = [
+        json.dumps({"type": "cycle_summary", "payload": summary},
+                    ensure_ascii=False, separators=(",", ":"))
+        for summary in summaries
+    ]
+
+    all_lines = kept_lines + summary_lines
+    if footer_line is not None:
+        all_lines.append(footer_line)
+
+    target.write_text("\n".join(all_lines) + "\n", encoding="utf-8")
+    return len(summary_lines)
+
