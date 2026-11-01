@@ -99,18 +99,33 @@ def _temperature_record(obj):
     return (timestamp, zones) if zones else None
 
 
-def load_temperature_data(source: str | Path) -> list[tuple[float, dict]]:
-    """Load temperature samples from a telemetry directory or run log file."""
+def _temperature_source_paths(source: str | Path | list[str] | tuple[str, ...]) -> list[Path]:
+    if isinstance(source, (list, tuple)):
+        paths = [Path(item) for item in source]
+        missing = [path for path in paths if not path.is_file()]
+        if missing:
+            raise FileNotFoundError(
+                "Temperature source files do not exist: "
+                + ", ".join(str(path) for path in missing)
+            )
+        return paths
+
     source_path = Path(source)
     if source_path.is_dir():
-        paths = sorted(
+        return sorted(
             path for path in source_path.rglob("*")
             if path.is_file() and path.suffix.casefold() in {".jsonl", ".log", ".json"}
         )
-    elif source_path.is_file():
-        paths = [source_path]
-    else:
-        raise FileNotFoundError(f"Temperature source does not exist: {source}")
+    if source_path.is_file():
+        return [source_path]
+    raise FileNotFoundError(f"Temperature source does not exist: {source}")
+
+
+def load_temperature_data(
+    source: str | Path | list[str] | tuple[str, ...],
+) -> list[tuple[float, dict]]:
+    """Load temperature samples from a directory or one or more run logs."""
+    paths = _temperature_source_paths(source)
 
     samples = []
     for path in paths:
@@ -134,11 +149,19 @@ def temperature_zones(samples: list[tuple[float, dict]]) -> list[str]:
     )
 
 
-def load_service_config_data(source: str | Path) -> list[tuple[float, dict]]:
+def load_service_config_data(
+    source: str | Path | list[str] | tuple[str, ...],
+) -> list[tuple[float, dict]]:
     """Load timestamped temperature connection metadata from service logs."""
-    source_path = Path(source)
-    directory = source_path if source_path.is_dir() else source_path.parent
-    paths = sorted(directory.glob("*_service_config_log.jsonl"))
+    if isinstance(source, (list, tuple)):
+        paths = [
+            Path(path) for path in source
+            if Path(path).is_file() and Path(path).name.endswith("_service_config_log.jsonl")
+        ]
+    else:
+        source_path = Path(source)
+        directory = source_path if source_path.is_dir() else source_path.parent
+        paths = sorted(directory.glob("*_service_config_log.jsonl"))
     samples = []
     for path in paths:
         with path.open(encoding="utf-8") as fh:
@@ -190,7 +213,7 @@ def _header_start_timestamp(payload: dict):
     return parsed.timestamp()
 
 
-def _temperature_at(samples, times, timestamp):
+def _temperature_at(samples, times, timestamp, max_delta=None):
     if not samples or timestamp is None:
         return None
     index = bisect_left(times, timestamp)
@@ -200,6 +223,8 @@ def _temperature_at(samples, times, timestamp):
         nearest = index - 1
     else:
         nearest = index if times[index] - timestamp < timestamp - times[index - 1] else index - 1
+    if max_delta is not None and abs(times[nearest] - timestamp) > max_delta:
+        return None
     return samples[nearest][1]
 
 
@@ -265,6 +290,43 @@ def read_header(path: str | Path) -> dict:
         raise ValueError("First line is not a header record.")
 
     return pl
+
+
+def restore_header_start_time(
+    path: str | Path,
+    start_time: str,
+) -> None:
+    """Write a missing header ``startTime`` while preserving the NDJSON file."""
+    target = Path(path)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f"{target.stem}.", suffix=".tmp", dir=str(target.parent)
+    )
+    os.close(fd)
+    temporary = Path(tmp_name)
+    try:
+        with target.open(encoding="utf-8") as source, temporary.open(
+            "w", encoding="utf-8"
+        ) as destination:
+            first = source.readline()
+            if not first:
+                raise ValueError(f"Cannot restore startTime in empty file: {target}")
+            obj = json.loads(first)
+            if obj.get("type") != "header":
+                raise ValueError(
+                    f"Cannot restore startTime; first row is not a header: {target}"
+                )
+            payload = _parse_payload(obj.get("payload", {}))
+            payload["startTime"] = start_time
+            obj["payload"] = payload
+            destination.write(json.dumps(
+                obj, ensure_ascii=False, separators=(",", ":")
+            ) + ("\n" if first.endswith("\n") else ""))
+            for line in source:
+                destination.write(line)
+        os.replace(temporary, target)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
 
 
 def stream_pressure(
@@ -454,6 +516,12 @@ def condense_log(
     temperature_times = (
         [sample[0] for sample in temperature_samples] if temperature_samples else None
     )
+    temperature_tolerance = (
+        detect_sample_interval_s(temperature_samples)
+        if temperature_samples else None
+    )
+    if temperature_samples and temperature_tolerance is None:
+        temperature_tolerance = 1.0
     service_config_times = (
         [sample[0] for sample in service_config_samples] if service_config_samples else None
     )
@@ -461,6 +529,9 @@ def condense_log(
     bytes_read   = 0
     total_rows   = 0
     pressure_rows = 0
+    temperature_rows_attached = 0
+    temperature_rows_unmatched = 0
+    temperature_rows_missing_timestamp = 0
 
     try:
         with input_path.open(encoding="utf-8") as fh_in, \
@@ -532,7 +603,8 @@ def condense_log(
                                     if header_start_timestamp is not None else None
                                 )
                                 temperatures = _temperature_at(
-                                    temperature_samples, temperature_times, absolute_timestamp
+                                    temperature_samples, temperature_times, absolute_timestamp,
+                                    max_delta=temperature_tolerance,
                                 )
                                 if temperatures:
                                     if selected_zones is not None:
@@ -541,9 +613,17 @@ def condense_log(
                                             for zone, values in temperatures.items()
                                             if zone in selected_zones
                                         }
-                                    merged["TemperatureZones"] = temperatures
+                                    if temperatures:
+                                        merged["TemperatureZones"] = temperatures
+                                        temperature_rows_attached += 1
+                                    else:
+                                        temperature_rows_unmatched += 1
+                                elif absolute_timestamp is None:
+                                    temperature_rows_missing_timestamp += 1
+                                else:
+                                    temperature_rows_unmatched += 1
                             except (TypeError, ValueError):
-                                pass
+                                temperature_rows_unmatched += 1
 
                         previous_meta = obj.get("meta", "") if rtype == "data" else ""
                         if service_config_samples:
@@ -600,6 +680,9 @@ def condense_log(
         "rows_written": rows_written,
         "total_rows": total_rows,
         "pressure_rows": pressure_rows,
+        "temperature_rows_attached": temperature_rows_attached,
+        "temperature_rows_unmatched": temperature_rows_unmatched,
+        "temperature_rows_missing_timestamp": temperature_rows_missing_timestamp,
         "input_size_bytes": file_size,
         "output_size_bytes": output_size,
         "size_reduction_pct": reduction_pct,
@@ -724,4 +807,3 @@ def write_cycle_summaries(path: str | Path, summaries: list[dict]) -> int:
 
     target.write_text("\n".join(all_lines) + "\n", encoding="utf-8")
     return len(summary_lines)
-

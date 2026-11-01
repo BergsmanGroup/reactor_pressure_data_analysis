@@ -25,8 +25,11 @@ compute_axis_limits(cycle_points, cycle_start_map) -> (max_cycle_time, max_press
 """
 
 import os
+import statistics
+import tempfile
 import textwrap
 import matplotlib.pyplot as plt
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.ticker import MultipleLocator
 
 
@@ -97,6 +100,81 @@ def build_segments(
     return segments
 
 
+def _split_into_runs(times: list, pressures: list, gap_factor: float = 4.0):
+    """
+    Split one phase's concatenated ``(times, pressures)`` arrays into
+    separate contiguous runs wherever there's an unusually large time gap.
+
+    ``build_segments`` deliberately concatenates every occurrence of a
+    repeated phase label within one cycle (e.g. a valve that's used twice in
+    the same sequence) into a single flat array, which is what the exposure/
+    leak-rate math wants. For *plotting*, though, drawing that flat array as
+    one line connects the end of the first occurrence straight to the start
+    of the next with a spurious diagonal line. This only changes how the
+    line is drawn -- it doesn't change the underlying segment data.
+    """
+    if len(times) < 3:
+        return [(times, pressures)]
+
+    deltas = [t2 - t1 for t1, t2 in zip(times, times[1:])]
+    median_delta = statistics.median(deltas)
+    threshold = max(median_delta * gap_factor, 1e-9)
+
+    runs = []
+    start = 0
+    for i, delta in enumerate(deltas, start=1):
+        if delta > threshold:
+            runs.append((times[start:i], pressures[start:i]))
+            start = i
+    runs.append((times[start:], pressures[start:]))
+    return runs
+
+
+def _format_summary_box_text(
+    temperature_summary: dict | None,
+    thickness_summary: dict | None,
+    temperature_zones_to_show: list | None = None,
+) -> str:
+    """Build the text for the optional temperature/thickness summary box."""
+    lines: list = []
+
+    if temperature_summary:
+        allowed = (
+            {str(zone) for zone in temperature_zones_to_show}
+            if temperature_zones_to_show is not None else None
+        )
+        temp_lines = []
+        for zone, info in temperature_summary.items():
+            if allowed is not None and str(zone) not in allowed:
+                continue
+            mean_c = info.get("MeanC")
+            std_c = info.get("StdDevC")
+            name = info.get("Name") or f"Zone {zone}"
+            if mean_c is None:
+                temp_lines.append(f"{name} (Zone {zone}): NaN \u00b1 NaN\u00b0C")
+            else:
+                temp_lines.append(f"{name} (Zone {zone}): {mean_c:.2f} \u00b1 {std_c:.2f}\u00b0C")
+        if temp_lines:
+            lines.append("Temperature:")
+            lines.extend(temp_lines)
+
+    if thickness_summary:
+        cycles = thickness_summary.get("Cycle", [])
+        thicknesses = thickness_summary.get("ThicknessNm", [])
+        thickness_lines = [
+            f"Cycle: {c:g}, thickness: {t:.2f}" if t is not None
+            else f"Cycle: {c:g}, thickness: NaN"
+            for c, t in zip(cycles, thicknesses)
+        ]
+        if thickness_lines:
+            if lines:
+                lines.append("")
+            lines.append("Thickness:")
+            lines.extend(thickness_lines)
+
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 #  Figure builder  (backend-agnostic — caller embeds or saves)
 # ---------------------------------------------------------------------------
@@ -116,6 +194,9 @@ def draw_cycle_figure(
     grid_y_spacing:  float | None = None,
     phase_background: dict | None = None,
     leakrate_regressions: list[dict] | None = None,
+    temperature_summary: dict | None = None,
+    thickness_summary: dict | None = None,
+    temperature_zones_to_show: list | None = None,
     figsize:         tuple = (10, 8),
 ) -> plt.Figure:
     """
@@ -185,13 +266,16 @@ def draw_cycle_figure(
         if pname not in segments:
             continue
         ts, ps = segments[pname]
-        ax.plot(ts, ps, linestyle="-", linewidth=1.4,
-                color=phase_color_map.get(pname, "gray"), label=pname)
+        color = phase_color_map.get(pname, "gray")
+        for i, (run_t, run_p) in enumerate(_split_into_runs(ts, ps)):
+            ax.plot(run_t, run_p, linestyle="-", linewidth=1.4,
+                    color=color, label=pname if i == 0 else None)
 
     if "unassigned" in segments:
         ts, ps = segments["unassigned"]
-        ax.plot(ts, ps, linestyle="-", linewidth=0.8,
-                color="#cccccc", label="unassigned")
+        for i, (run_t, run_p) in enumerate(_split_into_runs(ts, ps)):
+            ax.plot(run_t, run_p, linestyle="-", linewidth=0.8,
+                    color="#cccccc", label="unassigned" if i == 0 else None)
 
     ax.set_xlabel("Time (s)", fontsize=11)
     ax.set_ylabel("Pressure (mTorr)", fontsize=11)
@@ -212,10 +296,11 @@ def draw_cycle_figure(
         ax.grid(False, axis="y")
 
     handles, labels = ax.get_legend_handles_labels()
+    legend = None
     if handles:
-        ax.legend(handles, labels,
-                  loc="center left", bbox_to_anchor=(1.0, 0.5),
-                  fontsize=9, framealpha=0.9)
+        legend = ax.legend(handles, labels,
+                            loc="center left", bbox_to_anchor=(1.0, 0.5),
+                            fontsize=9, framealpha=0.9)
 
     if sequence_note:
         wrapped_note = textwrap.fill(sequence_note, width=52)
@@ -236,6 +321,43 @@ def draw_cycle_figure(
         )
 
     fig.tight_layout()
+
+    summary_text = _format_summary_box_text(
+        temperature_summary, thickness_summary, temperature_zones_to_show,
+    )
+    if summary_text:
+        if legend is not None:
+            # Measure the legend's actual rendered extent (after
+            # tight_layout, so the figure-fraction coordinates are final) so
+            # the summary box is placed just below it regardless of how many
+            # entries the legend ends up containing.
+            if not hasattr(fig.canvas, "get_renderer"):
+                FigureCanvasAgg(fig)
+            fig.canvas.draw()
+            renderer = fig.canvas.get_renderer()
+            legend_bbox = legend.get_window_extent(renderer)
+            (box_x, box_y), _ = fig.transFigure.inverted().transform(
+                [(legend_bbox.x0, legend_bbox.y0), (legend_bbox.x1, legend_bbox.y1)]
+            )
+            text_y = max(box_y - 0.02, 0.02)
+        else:
+            box_x, text_y = 1.02, 0.5
+        fig.text(
+            box_x,
+            text_y,
+            summary_text,
+            transform=fig.transFigure,
+            va="top",
+            ha="left",
+            fontsize=8,
+            bbox={
+                "boxstyle": "round,pad=0.35",
+                "facecolor": "white",
+                "edgecolor": "#666666",
+                "alpha": 0.93,
+            },
+        )
+
     return fig
 
 
@@ -246,8 +368,18 @@ def draw_cycle_figure(
 def save_cycle_figure(fig: plt.Figure, cycle: int, out_dir: str, dpi: int = 130):
     """Save *fig* as ``cycle_NNNN.png`` inside *out_dir* and close it."""
     out_path = os.path.join(out_dir, f"cycle_{cycle:04d}.png")
-    fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
-    plt.close(fig)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb", suffix=".png", dir=out_dir, delete=False
+        ) as temp_file:
+            temp_path = temp_file.name
+        fig.savefig(temp_path, dpi=dpi, bbox_inches="tight", format="png")
+        os.replace(temp_path, out_path)
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.unlink(temp_path)
+        plt.close(fig)
 
 
 # ---------------------------------------------------------------------------
@@ -500,6 +632,9 @@ def save_exposure_csv(rows: list, out_dir: str, stem: str) -> str:
         "_exposure",
         "_mean_pressure",
         "_leak_rate",
+        "_temperature_mean_c",
+        "_temperature_stdev_c",
+        "_temperature_setpoint_c",
     ]
 
     def _has_value(value):
@@ -579,12 +714,22 @@ def build_animation(
 
     out_path = os.path.join(out_dir, f"{filename}_animation.gif")
     if frames:
-        frames[0].save(
-            out_path,
-            save_all=True,
-            append_images=frames[1:],
-            optimize=False,
-            duration=int(1000 / fps),
-            loop=0,
-        )
+        temp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb", suffix=".gif", dir=out_dir, delete=False
+            ) as temp_file:
+                temp_path = temp_file.name
+            frames[0].save(
+                temp_path,
+                save_all=True,
+                append_images=frames[1:],
+                optimize=False,
+                duration=int(1000 / fps),
+                loop=0,
+            )
+            os.replace(temp_path, out_path)
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                os.unlink(temp_path)
     return out_path

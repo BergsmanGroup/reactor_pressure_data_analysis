@@ -26,12 +26,9 @@ Stages
                                  condensed JSON artifact. Honors
                                  ``temperature_sample_interval_s`` to
                                  downsample noisy/high-rate telemetry.
-4. (detailed iSE)            -- cycle-aligned thickness data (``ise_utils.
-                                 parse_ise_cycle_thickness``) is folded into
-                                 the Stage 6 ``cycle_summary`` rows when the
-                                 selected iSE file has ``Cycle``/``Thickness``
-                                 columns; the simple single-column thickness
-                                 CSV export is unaffected.
+4. ``attach_ise()``          -- optional; loads and cycle-aligns iSE
+                                 thickness data for the Stage 6 summaries
+                                 and plots.
 5. ``preview_cycle()``       -- render a single cycle figure for interactive
                                  use; always reflects the live shift/valve
                                  name options.
@@ -41,12 +38,14 @@ Stages
                                  per-cycle ``cycle_summary`` rows appended to
                                  the working file.
 
-``run_all()`` chains 1 -> 2 -> 3 (if enabled) -> 6 for one-click processing.
+``run_all()`` chains 1 -> 2 -> 3 (if enabled) -> 4 (if enabled) -> 6 for
+one-click processing.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import statistics
 import tempfile
 from dataclasses import dataclass, field
@@ -67,7 +66,8 @@ from data_parser import (
     condense_log, condensed_path, is_condensed_file,
     load_temperature_data, load_service_config_data,
     detect_sample_interval_s, downsample_samples,
-    collect_temperature_by_cycle, write_cycle_summaries,
+    collect_temperature_by_cycle, write_cycle_summaries, read_header,
+    restore_header_start_time,
 )
 from plot_utils import (
     build_segments,
@@ -79,7 +79,11 @@ from plot_utils import (
     save_exposure_csv,
     build_animation,
 )
-from ise_utils import save_ise_thickness_csv, parse_ise_cycle_thickness
+from ise_utils import (
+    save_ise_thickness_csv,
+    parse_ise_thickness,
+    map_ise_thickness_to_cycles,
+)
 
 
 @dataclass
@@ -97,10 +101,14 @@ class ProcessingOptions:
     leakrate_phase_reduction:   float = 0.0
     write_condensed_json:       bool = True
     add_temperature:            bool = False
-    temperature_source:         str | None = None
+    add_ise:                     bool = False
+    temperature_source:         str | list[str] | None = None
     selected_temperature_zones: list | None = None
     temperature_sample_interval_s: float | None = None
+    plot_temperature_zones:      list | None = None
     ise_file_path:               str = ""
+    ise_valve:                   str = "Valve7"
+    ise_first_cycle:             float = 1.0
     thickness_blank_rows:        int = 0
     fps:                        float = 5.0
 
@@ -120,6 +128,35 @@ def _format_phase_for_step(phase_name: str) -> str:
     if parts:
         parts[-1] = parts[-1].capitalize()
     return "_".join(parts)
+
+
+def _format_zone_temperatures(
+    cycle_temps: dict,
+    zone_names: dict,
+    selected_zones=None,
+) -> dict:
+    """Shared formatting used by both the per-plot summary box and cycle_summary rows."""
+    zones = (
+        {str(zone) for zone in selected_zones}
+        if selected_zones is not None
+        else set(cycle_temps)
+    )
+    zones.update(cycle_temps)
+    return {
+        zone: {
+            "Name": zone_names.get(zone, ""),
+            "SetPointC": bucket.get("setpoint"),
+            "MeanC": round(statistics.fmean(bucket["temps"]), 3) if bucket.get("temps") else None,
+            "StdDevC": (
+                round(statistics.pstdev(bucket["temps"]), 3)
+                if len(bucket.get("temps", [])) > 1 else (
+                    0.0 if bucket.get("temps") else None
+                )
+            ),
+        }
+        for zone in sorted(zones, key=lambda value: (int(value) if value.isdigit() else float("inf"), value))
+        for bucket in [cycle_temps.get(zone, {})]
+    }
 
 
 _EXPOSURE_SUFFIXES = (
@@ -234,11 +271,13 @@ class ReactorPipeline:
         self.ylim_val: float | None = None
         self.exposure_rows: list | None = None
         self.cycle_summaries: list | None = None
+        self.ise_thickness_by_cycle: dict = {}
 
         stem = self.raw_path.stem
         self.filename = stem[:-len("_condensed")] if stem.endswith("_condensed") else stem
 
-        self.stage = "none"   # none -> condensed -> labeled -> temperature -> generated
+        self.stage = "none"   # none -> condensed -> labeled -> temperature -> iSE -> generated
+        self._phase_bake_signature: tuple | None = None
 
     # -------------------------------------------------------------------
     #  Housekeeping
@@ -265,6 +304,16 @@ class ReactorPipeline:
         phased_seq = compute_phase_bins(named_seq, shift=shift)
         cyc_seq_map = make_cycle_seq_map(phased_seq)
         return phased_seq, cyc_seq_map
+
+    def _resolved_ise_valve(self) -> str:
+        """Resolve a ValveN selector to its current display name."""
+        target = str(self.options.ise_valve).strip()
+        match = re.fullmatch(r"valve\s*(\d+)", target, flags=re.IGNORECASE)
+        if not match:
+            return target
+        valve_number = int(match.group(1))
+        names = self.options.valve_names
+        return str(names.get(valve_number, names.get(str(valve_number), target)))
 
     def _phase_lookup(self, cycle, time_s, raw_step, payload):
         seq_key = self.cyc_seq_map.get(cycle)
@@ -336,17 +385,27 @@ class ReactorPipeline:
         if progress_cb:
             progress_cb(100)
         self.stage = "condensed"
+        self._phase_bake_signature = None  # working file is freshly unlabeled
         return stats
 
     # -------------------------------------------------------------------
     #  Stage 2 -- label sequences & phases
     # -------------------------------------------------------------------
 
-    def label_phases(self, log_cb=None) -> None:
+    def label_phases(
+        self,
+        progress_cb: Callable[[float], None] | None = None,
+        log_cb=None,
+    ) -> None:
         """
         Compute phase bins/names from the header valve sequence (fast,
         in-memory) and, if a condensed JSON artifact is being kept, bake
         per-row phase labels into the working file.
+
+        The file bake-in pass is skipped if it was already done for the
+        current shift/valve-name combination (e.g. when ``generate_outputs``
+        calls this defensively right after an explicit Stage 2 run), so
+        re-running this step repeatedly doesn't repeatedly rewrite the file.
         """
         log = log_cb or _noop_log
 
@@ -364,18 +423,30 @@ class ReactorPipeline:
             log(f"  {seq_key} bins (s): {seq_data.get('phase_bins', [])}")
             log(f"  {seq_key} phases  : {seq_data.get('phase_names', [])}")
 
+        signature = (
+            self.options.shift,
+            tuple(sorted(self.options.valve_names.items())),
+        )
         if self.options.write_condensed_json and self.working_path is not None:
-            log("Labeling phases in condensed log...")
-            stats = self._save(
-                lambda: condense_log(
-                    self.working_path, self.working_path,
-                    phase_lookup=self._phase_lookup,
-                    return_stats=True,
-                ),
-                str(self.working_path),
-                "condensed log",
-            )
-            log(f"  Labeled {stats['rows_written']:,} rows")
+            if signature == self._phase_bake_signature:
+                log("  Phase labels already up to date in condensed log -- skipping re-bake.")
+            else:
+                log("Labeling phases in condensed log...")
+                stats = self._save(
+                    lambda: condense_log(
+                        self.working_path, self.working_path,
+                        phase_lookup=self._phase_lookup,
+                        progress_cb=_pct_adapter(progress_cb, 0, 100),
+                        return_stats=True,
+                    ),
+                    str(self.working_path),
+                    "condensed log",
+                )
+                log(f"  Labeled {stats['rows_written']:,} rows")
+                self._phase_bake_signature = signature
+
+        if progress_cb:
+            progress_cb(100)
 
         if self.stage == "none":
             self.stage = "labeled"
@@ -406,6 +477,31 @@ class ReactorPipeline:
         service_config_samples = load_service_config_data(self.options.temperature_source)
         log(f"  Loaded {len(temperature_samples):,} temperature samples")
         log(f"  Loaded {len(service_config_samples):,} service config entries")
+        try:
+            header = read_header(self.working_path)
+        except (OSError, ValueError) as exc:
+            log(f"  WARNING: could not read the condensed header: {exc}")
+            return None
+        if not isinstance(header.get("startTime"), str) or not header["startTime"].strip():
+            try:
+                raw_header = read_header(self.raw_path)
+            except (OSError, ValueError) as exc:
+                log(f"  WARNING: condensed header {self.working_path} has no startTime, "
+                    f"and raw header {self.raw_path} could not be read: {exc}")
+                return None
+            raw_start_time = raw_header.get("startTime")
+            if not isinstance(raw_start_time, str) or not raw_start_time.strip():
+                log(f"  WARNING: condensed header {self.working_path} and raw header "
+                    f"{self.raw_path} have no startTime; temperature attachment skipped.")
+                return None
+            try:
+                restore_header_start_time(self.working_path, raw_start_time)
+            except (OSError, TypeError, ValueError) as exc:
+                log(f"  WARNING: could not restore startTime from raw header "
+                    f"{self.raw_path} into {self.working_path}: {exc}")
+                return None
+            header["startTime"] = raw_start_time
+            log(f"  Restored missing condensed-header startTime from {self.raw_path}")
 
         interval = self.options.temperature_sample_interval_s
         if interval:
@@ -426,14 +522,80 @@ class ReactorPipeline:
             str(self.working_path),
             "condensed log",
         )
-        log(f"  Attached temperature data to {stats['rows_written']:,} rows")
+        attached = stats.get("temperature_rows_attached", 0)
+        unmatched = stats.get("temperature_rows_unmatched", 0)
+        missing_timestamp = stats.get("temperature_rows_missing_timestamp", 0)
+        log(f"  Attached temperature data to {attached:,} rows")
+        attached_cycles = set()
+        try:
+            attached_cycles = set(collect_temperature_by_cycle(
+                self.working_path, self.options.selected_temperature_zones,
+            ))
+        except (OSError, ValueError):
+            pass
+        missing_cycles = sorted(set(self.cycle_points) - attached_cycles)
+        if missing_cycles:
+            log("  WARNING: no temperature data available for cycles: "
+                + ", ".join(str(cycle) for cycle in missing_cycles))
+        if not temperature_samples:
+            log("  WARNING: no usable temperature samples were found; no rows were annotated.")
+        if missing_timestamp:
+            log(f"  WARNING: {missing_timestamp:,} rows had no usable header startTime.")
+        if unmatched:
+            log(f"  WARNING: {unmatched:,} rows had no temperature sample within the "
+                "available telemetry interval.")
         if progress_cb:
             progress_cb(100)
         self.stage = "temperature"
         return stats
 
+    # -------------------------------------------------------------------
+    #  Stage 4 -- attach iSE thickness data (optional)
+    # -------------------------------------------------------------------
+
+    def attach_ise(self, progress_cb: Callable[[float], None] | None = None, log_cb=None) -> dict:
+        """Load and align iSE thickness readings with the condensed cycles."""
+        log = log_cb or _noop_log
+        ise_path = (self.options.ise_file_path or "").strip()
+        if not ise_path or not Path(ise_path).is_file():
+            log("iSE attachment skipped: select a valid iSE data file.")
+            self.ise_thickness_by_cycle = {}
+            return {}
+        if not self.cycle_points:
+            log("iSE attachment skipped: condense and label data first.")
+            return {}
+
+        try:
+            thickness_values = parse_ise_thickness(ise_path)
+            resolved_valve = self._resolved_ise_valve()
+            self.ise_thickness_by_cycle = map_ise_thickness_to_cycles(
+                thickness_values,
+                sorted(self.cycle_points),
+                self.cyc_seq_map,
+                self.phased_seq,
+                resolved_valve,
+                self.options.ise_first_cycle,
+            )
+        except (OSError, ValueError, TypeError) as exc:
+            log(f"iSE attachment ERROR: {exc}")
+            self.ise_thickness_by_cycle = {}
+            return {}
+
+        log(f"  Attached {len(thickness_values):,} iSE thickness readings "
+            f"from {Path(ise_path).name} to {len(self.ise_thickness_by_cycle):,} cycles "
+            f"(valve {self.options.ise_valve!r} -> {self._resolved_ise_valve()!r})")
+        if not self.ise_thickness_by_cycle:
+            log(f"  WARNING: no occurrences of iSE valve {self.options.ise_valve!r} "
+                "were found in the labeled phase structure.")
+        if progress_cb:
+            progress_cb(100)
+        self.stage = "ise"
+        return self.ise_thickness_by_cycle
+
     @staticmethod
-    def detect_temperature_interval(temperature_source: str) -> float | None:
+    def detect_temperature_interval(
+        temperature_source: str | list[str],
+    ) -> float | None:
         """Convenience for the GUI: auto-suggest a downsampling interval."""
         samples = load_temperature_data(temperature_source)
         return detect_sample_interval_s(samples)
@@ -495,6 +657,12 @@ class ReactorPipeline:
             cycle, cycle_points, cycle_start_map, phased_seq, cyc_seq_map, assign_phase,
             self.options.leakrate_phase_reduction,
         )
+        temperature_by_cycle, zone_names, thickness_by_cycle = self._load_cycle_annotations(
+            phased_sequences=phased_seq,
+            cycle_sequence_map=cyc_seq_map,
+        )
+        cycle_temps = temperature_by_cycle.get(cycle)
+        plot_zones = self.options.plot_temperature_zones
         fig = draw_cycle_figure(
             cycle, self.filename, segs, phase_color_map, all_phase_names,
             xlim_val, ylim_val,
@@ -504,6 +672,12 @@ class ReactorPipeline:
             phase_background=unshifted_seq.get(seq_key, {}),
             leakrate_regressions=leakrate_regressions,
             sequence_note=self._sequence_note_fn(seq_key, phased_seq),
+            temperature_summary=(
+                _format_zone_temperatures(cycle_temps or {}, zone_names, plot_zones)
+                if cycle_temps or plot_zones else None
+            ),
+            thickness_summary=thickness_by_cycle.get(cycle),
+            temperature_zones_to_show=self.options.plot_temperature_zones,
             figsize=(10, 7),
         )
         if progress_cb:
@@ -529,6 +703,8 @@ class ReactorPipeline:
 
         self.label_phases(log_cb=log)
 
+        temperature_by_cycle, zone_names, thickness_by_cycle = self._load_cycle_annotations(log_cb=log)
+
         os.makedirs(self.out_dir, exist_ok=True)
         cycles_sorted = sorted(self.cycle_points.keys())
         total = len(cycles_sorted) or 1
@@ -545,6 +721,7 @@ class ReactorPipeline:
                 cycle, self.cycle_points, self.cycle_start_map,
                 self.phased_seq, self.cyc_seq_map, assign_phase,
             )
+            cycle_temps = temperature_by_cycle.get(cycle)
             fig = draw_cycle_figure(
                 cycle, self.filename, segs, self.phase_color_map, self.all_phase_names,
                 self.xlim_val, self.ylim_val,
@@ -552,6 +729,12 @@ class ReactorPipeline:
                 grid_x_spacing=self.options.grid_x_spacing,
                 grid_y_spacing=self.options.grid_y_spacing,
                 sequence_note=self._sequence_note_fn(seq_key, self.phased_seq),
+                temperature_summary=(
+                        _format_zone_temperatures(cycle_temps or {}, zone_names, self.options.plot_temperature_zones)
+                        if cycle_temps or self.options.plot_temperature_zones else None
+                    ),
+                thickness_summary=thickness_by_cycle.get(cycle),
+                temperature_zones_to_show=self.options.plot_temperature_zones,
             )
             png_path = os.path.join(self.out_dir, f"cycle_{cycle:04d}.png")
             try:
@@ -566,11 +749,25 @@ class ReactorPipeline:
         log("Computing phase exposures...")
         if self.options.leakrate_phase_reduction > 0:
             log(f"  LeakRate phase reduction: {self.options.leakrate_phase_reduction:.3f} s on each side")
+        temperature_by_cycle, zone_names, thickness_by_cycle = self._load_cycle_annotations(log_cb=log)
         exposure_rows = compute_exposure_table(
             cycles_sorted, self.cycle_points, self.cycle_start_map,
             self.phased_seq, self.cyc_seq_map, assign_phase,
             leakrate_phase_reduction=self.options.leakrate_phase_reduction,
         )
+        cycle_zero = min(cycles_sorted) if cycles_sorted else 0
+        for row in exposure_rows:
+            cycle = row["cycle number"] + cycle_zero
+            for zone, bucket in temperature_by_cycle.get(cycle, {}).items():
+                prefix = f"zone_{zone}"
+                temps = bucket.get("temps", [])
+                row[f"{prefix}_temperature_mean_c"] = (
+                    round(statistics.fmean(temps), 3) if temps else None
+                )
+                row[f"{prefix}_temperature_stdev_c"] = (
+                    round(statistics.pstdev(temps), 3) if len(temps) > 1 else 0.0
+                )
+                row[f"{prefix}_temperature_setpoint_c"] = bucket.get("setpoint")
         self.exposure_rows = exposure_rows
         csv_path = os.path.join(self.out_dir, f"{self.filename}_exposure.csv")
         self._save(
@@ -583,18 +780,41 @@ class ReactorPipeline:
 
         thickness_path = None
         ise_path = (self.options.ise_file_path or "").strip()
-        if ise_path and Path(ise_path).is_file():
+        if self.options.add_ise and ise_path and Path(ise_path).is_file():
             thickness_path = os.path.join(self.out_dir, f"{self.filename}_thickness.csv")
-            n_thickness = self._save(
-                lambda: save_ise_thickness_csv(
-                    ise_path, thickness_path, blank_rows=self.options.thickness_blank_rows,
-                ),
-                thickness_path, "thickness CSV",
-            )
-            log(f"  Thickness CSV: {Path(thickness_path).name} "
-                f"({n_thickness} rows from {Path(ise_path).name})")
+            thickness_values = parse_ise_thickness(ise_path)
+            if thickness_values:
+                n_thickness = self._save(
+                    lambda: save_ise_thickness_csv(
+                        ise_path, thickness_path, blank_rows=self.options.thickness_blank_rows,
+                    ),
+                    thickness_path, "thickness CSV",
+                )
+                log(f"  Thickness CSV: {Path(thickness_path).name} "
+                    f"({n_thickness} rows from {Path(ise_path).name})")
+            else:
+                log(f"  WARNING: iSE file {Path(ise_path).name} contains no usable "
+                    "thickness values; thickness CSV skipped.")
+                thickness_path = None
+                stale_path = Path(self.out_dir) / f"{self.filename}_thickness.csv"
+                if stale_path.is_file():
+                    try:
+                        stale_path.unlink()
+                        log(f"  Removed stale thickness CSV: {stale_path.name}")
+                    except OSError as exc:
+                        log(f"  WARNING: could not remove stale thickness CSV: {exc}")
         else:
-            log("  Thickness CSV: skipped (select a valid iSE data file)")
+            if self.options.add_ise:
+                log("  Thickness CSV: skipped (select a valid iSE data file)")
+            else:
+                log("  Thickness CSV: skipped (iSE attachment not selected)")
+            stale_path = Path(self.out_dir) / f"{self.filename}_thickness.csv"
+            if stale_path.is_file():
+                try:
+                    stale_path.unlink()
+                    log(f"  Removed stale thickness CSV: {stale_path.name}")
+                except OSError as exc:
+                    log(f"  WARNING: could not remove stale thickness CSV: {exc}")
         if progress_cb:
             progress_cb(75)
 
@@ -616,7 +836,12 @@ class ReactorPipeline:
             progress_cb(90)
 
         log("Assembling cycle summaries...")
-        self.generate_cycle_summaries(log_cb=log)
+        self.generate_cycle_summaries(
+            log_cb=log,
+            temperature_by_cycle=temperature_by_cycle,
+            zone_names=zone_names,
+            thickness_by_cycle=thickness_by_cycle,
+        )
         if progress_cb:
             progress_cb(100)
 
@@ -629,24 +854,21 @@ class ReactorPipeline:
             "cycle_summaries": len(self.cycle_summaries or []),
         }
 
-    def generate_cycle_summaries(self, log_cb=None) -> list[dict]:
+    def _load_cycle_annotations(
+        self,
+        log_cb=None,
+        phased_sequences: dict | None = None,
+        cycle_sequence_map: dict | None = None,
+    ) -> tuple[dict, dict, dict]:
         """
-        Assemble one ``cycle_summary`` dict per cycle -- start/end time,
-        sequence note, per-precursor exposure/leak-rate (from
-        ``compute_exposure_table``), per-zone temperature mean/stdev (from
-        the working file's baked-in ``TemperatureZones``, if Stage 3 ran),
-        and cycle-aligned iSE thickness readings (if the selected iSE file
-        has ``Cycle``/``Thickness`` columns). When a condensed JSON artifact
-        is being kept, the rows are also appended to the working file.
+        Load per-cycle temperature aggregates + zone names (from the working
+        file's baked-in ``TemperatureZones``, if Stage 3 ran) and cycle-
+        aligned iSE thickness readings (if the selected iSE file has
+        ``Cycle``/``Thickness`` columns). Shared by the per-cycle plot
+        summary box and ``generate_cycle_summaries`` so this I/O only
+        happens once per ``generate_outputs()`` call.
         """
         log = log_cb or _noop_log
-
-        cycles_sorted = sorted(self.cycle_points.keys())
-        cycle_zero = min(cycles_sorted) if cycles_sorted else 0
-        exposure_rows = self.exposure_rows or []
-        exposure_by_cycle = {
-            row["cycle number"] + cycle_zero: row for row in exposure_rows
-        }
 
         temperature_by_cycle: dict = {}
         zone_names: dict = {}
@@ -656,7 +878,7 @@ class ReactorPipeline:
                     self.working_path, self.options.selected_temperature_zones,
                 )
             except Exception as exc:
-                log(f"  WARNING: could not read temperature data for cycle summaries: {exc}")
+                log(f"  WARNING: could not read temperature data: {exc}")
             if self.options.temperature_source:
                 try:
                     config_samples = load_service_config_data(self.options.temperature_source)
@@ -665,13 +887,58 @@ class ReactorPipeline:
                 except Exception:
                     pass
 
-        thickness_by_cycle: dict = {}
+        thickness_by_cycle: dict = dict(self.ise_thickness_by_cycle)
         ise_path = (self.options.ise_file_path or "").strip()
-        if ise_path and Path(ise_path).is_file():
+        if not thickness_by_cycle and self.options.add_ise and ise_path and Path(ise_path).is_file():
             try:
-                thickness_by_cycle = parse_ise_cycle_thickness(ise_path)
+                thickness_values = parse_ise_thickness(ise_path)
+                thickness_by_cycle = map_ise_thickness_to_cycles(
+                    thickness_values,
+                    sorted(self.cycle_points),
+                    cycle_sequence_map if cycle_sequence_map is not None else self.cyc_seq_map,
+                    phased_sequences if phased_sequences is not None else self.phased_seq,
+                    self._resolved_ise_valve(),
+                    self.options.ise_first_cycle,
+                )
             except Exception as exc:
-                log(f"  WARNING: could not parse cycle-aligned iSE data: {exc}")
+                log(f"  WARNING: could not attach iSE thickness data: {exc}")
+
+        return temperature_by_cycle, zone_names, thickness_by_cycle
+
+    def generate_cycle_summaries(
+        self,
+        log_cb=None,
+        temperature_by_cycle: dict | None = None,
+        zone_names: dict | None = None,
+        thickness_by_cycle: dict | None = None,
+    ) -> list[dict]:
+        """
+        Assemble one ``cycle_summary`` dict per cycle -- start/end time,
+        sequence note, per-precursor exposure/leak-rate (from
+        ``compute_exposure_table``), per-zone temperature mean/stdev (from
+        the working file's baked-in ``TemperatureZones``, if Stage 3 ran),
+        and cycle-aligned iSE thickness readings (if the selected iSE file
+        has ``Cycle``/``Thickness`` columns). When a condensed JSON artifact
+        is being kept, the rows are also appended to the working file.
+
+        ``temperature_by_cycle``/``zone_names``/``thickness_by_cycle`` can be
+        passed in (as ``generate_outputs()`` does) to reuse data already
+        loaded by ``_load_cycle_annotations`` instead of reloading it.
+        """
+        log = log_cb or _noop_log
+
+        if temperature_by_cycle is None or zone_names is None or thickness_by_cycle is None:
+            loaded_temp, loaded_names, loaded_thickness = self._load_cycle_annotations(log_cb=log)
+            temperature_by_cycle = temperature_by_cycle if temperature_by_cycle is not None else loaded_temp
+            zone_names = zone_names if zone_names is not None else loaded_names
+            thickness_by_cycle = thickness_by_cycle if thickness_by_cycle is not None else loaded_thickness
+
+        cycles_sorted = sorted(self.cycle_points.keys())
+        cycle_zero = min(cycles_sorted) if cycles_sorted else 0
+        exposure_rows = self.exposure_rows or []
+        exposure_by_cycle = {
+            row["cycle number"] + cycle_zero: row for row in exposure_rows
+        }
 
         summaries = []
         for cycle in cycles_sorted:
@@ -696,21 +963,7 @@ class ReactorPipeline:
 
             cycle_temps = temperature_by_cycle.get(cycle)
             if cycle_temps:
-                summary["Temperature"] = {
-                    zone: {
-                        "Name": zone_names.get(zone, ""),
-                        "SetPointC": bucket["setpoint"],
-                        "MeanC": (
-                            round(statistics.fmean(bucket["temps"]), 3)
-                            if bucket["temps"] else None
-                        ),
-                        "StdDevC": (
-                            round(statistics.pstdev(bucket["temps"]), 3)
-                            if len(bucket["temps"]) > 1 else 0.0
-                        ),
-                    }
-                    for zone, bucket in cycle_temps.items()
-                }
+                summary["Temperature"] = _format_zone_temperatures(cycle_temps, zone_names)
 
             cycle_thickness = thickness_by_cycle.get(cycle)
             if cycle_thickness:
@@ -732,8 +985,14 @@ class ReactorPipeline:
     #  Convenience -- run everything in one call
     # -------------------------------------------------------------------
 
-    def run_all(self, progress_cb: Callable[[float], None] | None = None, log_cb=None) -> dict:
-        """Condense -> label phases -> (optional) attach temperature -> generate outputs."""
+    def run_all(
+        self,
+        progress_cb: Callable[[float], None] | None = None,
+        log_cb=None,
+        attach_temperature: bool | None = None,
+        attach_ise: bool | None = None,
+    ) -> dict:
+        """Condense -> label -> optional annotations -> generate outputs."""
         log = log_cb or _noop_log
 
         def _sub(lo, hi):
@@ -746,9 +1005,22 @@ class ReactorPipeline:
         if progress_cb:
             progress_cb(25)
 
-        if self.options.add_temperature and self.options.temperature_source:
+        should_attach_temperature = (
+            self.options.add_temperature
+            if attach_temperature is None else attach_temperature
+        )
+        if should_attach_temperature and self.options.temperature_source:
             self.attach_temperature(progress_cb=_sub(25, 35), log_cb=log)
         elif progress_cb:
             progress_cb(35)
 
-        return self.generate_outputs(progress_cb=_sub(35, 100), log_cb=log)
+        should_attach_ise = self.options.add_ise if attach_ise is None else attach_ise
+        self.options.add_ise = should_attach_ise
+        if should_attach_ise:
+            self.attach_ise(progress_cb=_sub(35, 40), log_cb=log)
+        else:
+            self.ise_thickness_by_cycle = {}
+            if progress_cb:
+                progress_cb(40)
+
+        return self.generate_outputs(progress_cb=_sub(40, 100), log_cb=log)

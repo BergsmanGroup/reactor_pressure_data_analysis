@@ -34,6 +34,7 @@ from pipeline import ReactorPipeline, ProcessingOptions
 from convert_to_json import load_table, build_payload, save_payload, validate_recipe_sheet, build_output_filename_report
 from header_editor import open_header_editor
 from header_text import (
+    associated_header_artifacts,
     compare_header_payloads,
     format_human_json,
     parse_header_text,
@@ -60,6 +61,7 @@ class ReactorApp(tk.Tk):
         self._file_path         = tk.StringVar()
         self._header_txt_path    = tk.StringVar()
         self._header_comparison_warning_var = tk.StringVar()
+        self._header_alignment_warning_var = tk.StringVar()
         self._output_dir        = tk.StringVar()
         self._xlim_var          = tk.StringVar()
         self._ylim_var          = tk.StringVar()
@@ -75,16 +77,22 @@ class ReactorApp(tk.Tk):
         self._preview_cycle_var = tk.StringVar(value="1")
         self._write_condensed_json_var = tk.BooleanVar(value=True)
         self._add_temperature_var = tk.BooleanVar(value=True)
+        self._run_all_attach_temperature_var = tk.BooleanVar(value=True)
+        self._run_all_attach_ise_var = tk.BooleanVar(value=False)
         self._temperature_source_mode = tk.StringVar(value="directory")
         self._temperature_directory_var = tk.StringVar(
             value=r"C:\Users\Owner\Desktop\GitHub\brg_cn616a_UPDATED\logs"
         )
         self._temperature_file_var = tk.StringVar()
+        self._temperature_file_paths: list[str] = []
         self._temperature_zones_vars: dict[str, tk.BooleanVar] = {}
+        self._plot_temperature_zones_vars: dict[str, tk.BooleanVar] = {}
         self._temperature_sample_interval_var = tk.StringVar()
         self._temperature_detected_interval_var = tk.StringVar(value="")
         self._exclude_falsey_edr_tags_var = tk.BooleanVar(value=False)
         self._ise_file_path     = tk.StringVar()
+        self._ise_valve_var     = tk.StringVar(value="Valve7")
+        self._ise_first_cycle_var = tk.StringVar(value="1.0")
         self._recipe_sheet_path = tk.StringVar()
         self._recipe_output_path = tk.StringVar()
         self._recipe_status_var = tk.StringVar(value="Load a recipe sheet to preview the payload.")
@@ -141,13 +149,23 @@ class ReactorApp(tk.Tk):
         ttk.Entry(file_frame, textvariable=self._file_path, width=54).pack(
             side="left", expand=True, fill="x", padx=(0, 4))
         ttk.Button(file_frame, text="Browse...",    command=self._browse_file  ).pack(side="left", padx=(0, 4))
-        ttk.Button(file_frame, text="Load Header",  command=self._load_header  ).pack(side="left", padx=(0, 4))
+        self._load_header_btn = ttk.Button(
+            file_frame, text="Load Header", command=self._load_header
+        )
+        self._load_header_btn.pack(side="left", padx=(0, 4))
         self._edit_header_btn = ttk.Button(
             file_frame, text="Edit Header...", command=self._edit_header, state="disabled"
         )
         self._edit_header_btn.pack(side="left", padx=(0, 4))
         ttk.Button(file_frame, text="Open File Location",
                    command=self._open_raw_file_location).pack(side="left")
+        tk.Label(
+            file_frame,
+            textvariable=self._header_alignment_warning_var,
+            foreground="red",
+            anchor="w",
+            justify="left",
+        ).pack(side="left", padx=(8, 0))
 
         self._header_txt_frame = ttk.LabelFrame(parent, text="Header Text File", padding=8)
         self._header_txt_frame.pack(fill="x", padx=10, pady=4)
@@ -176,6 +194,7 @@ class ReactorApp(tk.Tk):
             self._header_txt_frame,
             text="Use Header JSON",
             command=self._use_header_text_as_raw_header,
+            state="disabled",
         ).pack(side="left", padx=(6, 0))
         tk.Label(
             self._header_txt_frame,
@@ -205,7 +224,7 @@ class ReactorApp(tk.Tk):
             temp_frame, text="Browse...", command=self._browse_temperature_directory)
         self._temperature_directory_browse.grid(row=1, column=3, padx=(0, 4), pady=(4, 0))
         ttk.Radiobutton(
-            temp_frame, text="Specific run log file",
+            temp_frame, text="Specific run log files",
             variable=self._temperature_source_mode, value="file",
             command=self._refresh_temperature_source,
         ).grid(row=2, column=0, sticky="w")
@@ -213,7 +232,7 @@ class ReactorApp(tk.Tk):
             temp_frame, textvariable=self._temperature_file_var, width=58)
         self._temperature_file_entry.grid(row=2, column=1, columnspan=2, sticky="ew", padx=4)
         self._temperature_file_browse = ttk.Button(
-            temp_frame, text="Choose run log...", command=self._browse_temperature_file)
+            temp_frame, text="Choose run logs...", command=self._browse_temperature_file)
         self._temperature_file_browse.grid(row=2, column=3, padx=(0, 4))
         ttk.Label(temp_frame, text="Zones (auto-detected; uncheck to omit):").grid(
             row=3, column=0, sticky="nw", pady=(5, 0))
@@ -239,8 +258,14 @@ class ReactorApp(tk.Tk):
             padding=8,
         )
         ise_frame.pack(fill="x", **pad)
-        ttk.Entry(ise_frame, textvariable=self._ise_file_path, width=54).pack(
+        ttk.Entry(ise_frame, textvariable=self._ise_file_path, width=42).pack(
             side="left", expand=True, fill="x", padx=(0, 4))
+        ttk.Label(ise_frame, text="Valve:").pack(side="left", padx=(4, 2))
+        ttk.Entry(ise_frame, textvariable=self._ise_valve_var, width=10).pack(
+            side="left", padx=(0, 4))
+        ttk.Label(ise_frame, text="First cycle/half-cycle:").pack(side="left", padx=(4, 2))
+        ttk.Entry(ise_frame, textvariable=self._ise_first_cycle_var, width=7).pack(
+            side="left", padx=(0, 4))
         ttk.Button(ise_frame, text="Browse...", command=self._browse_ise_file).pack(
             side="left", padx=(0, 4))
         ttk.Button(ise_frame, text="Open File Location",
@@ -310,14 +335,27 @@ class ReactorApp(tk.Tk):
             text="Write condensed data JSON",
             variable=self._write_condensed_json_var,
         ).grid(row=9, column=0, columnspan=3, sticky="w", padx=3, pady=(6, 0))
+        ttk.Label(plot_frame, text="Summary box zones:").grid(
+            row=10, column=0, sticky="nw", padx=3, pady=(6, 0))
+        self._plot_temperature_zones_frame = ttk.Frame(plot_frame)
+        self._plot_temperature_zones_frame.grid(
+            row=10, column=1, columnspan=3, sticky="w", padx=3, pady=(6, 0))
 
-        # -- Run All (one-click condense + label + temperature + plots + animation) --
+        # -- Run All (one-click condense + label + optional attachments + outputs) --
         run_all_row = ttk.Frame(parent)
         run_all_row.pack(fill="x", padx=10, pady=(6, 0))
         self._run_all_btn = ttk.Button(
             run_all_row, text="Run All (Condense -> Plots -> Animation)",
             command=self._start_run_all, state="disabled")
         self._run_all_btn.pack(side="left", padx=(0, 8))
+        ttk.Checkbutton(
+            run_all_row, text="attach temperature data",
+            variable=self._run_all_attach_temperature_var,
+        ).pack(side="left", padx=(0, 8))
+        ttk.Checkbutton(
+            run_all_row, text="attach iSE data",
+            variable=self._run_all_attach_ise_var,
+        ).pack(side="left", padx=(0, 8))
         self._progress = ttk.Progressbar(
             run_all_row, orient="horizontal", mode="determinate", length=1)
         self._progress.pack(side="left", expand=True, fill="x")
@@ -342,6 +380,10 @@ class ReactorApp(tk.Tk):
             steps_frame, text="3. Attach Temperature Data (optional)",
             command=self._start_attach_temperature, state="disabled")
         self._attach_temp_btn.grid(row=0, column=2, padx=6, pady=2, sticky="w")
+        self._attach_ise_btn = ttk.Button(
+            steps_frame, text="4. Attach iSE Data (optional)",
+            command=self._start_attach_ise, state="disabled")
+        self._attach_ise_btn.grid(row=0, column=3, padx=6, pady=2, sticky="w")
 
         # -- Preview controls -------------------------------------------------
         prev_row = ttk.Frame(parent)
@@ -373,6 +415,10 @@ class ReactorApp(tk.Tk):
             log_frame, height=10, state="disabled",
             font=("Consolas", 9), wrap="word")
         self._log_box.pack(fill="both", expand=True)
+
+        # Re-run zone detection now that the Plot Options zone checkboxes
+        # exist, so a valid default temperature source populates both groups.
+        self._detect_temperature_zones()
 
     def _build_recipe_tab(self, parent):
         pad = {"padx": 10, "pady": 4}
@@ -973,6 +1019,7 @@ class ReactorApp(tk.Tk):
         temperature_directory = last.get("temperature_directory")
         temperature_file = last.get("temperature_file")
         temperature_source_mode = last.get("temperature_source_mode")
+        ise_valve = last.get("ise_valve")
         leakrate_phase_reduction = last.get("leakrate_phase_reduction")
         if xlim is not None:
             self._xlim_var.set(str(xlim))
@@ -1003,9 +1050,16 @@ class ReactorApp(tk.Tk):
         if temperature_directory is not None:
             self._temperature_directory_var.set(str(temperature_directory))
         if temperature_file is not None:
-            self._temperature_file_var.set(str(temperature_file))
+            if isinstance(temperature_file, list):
+                self._temperature_file_paths = [str(path) for path in temperature_file]
+                self._temperature_file_var.set("; ".join(self._temperature_file_paths))
+            else:
+                self._temperature_file_paths = []
+                self._temperature_file_var.set(str(temperature_file))
         if temperature_source_mode in ("directory", "file"):
             self._temperature_source_mode.set(temperature_source_mode)
+        if ise_valve is not None:
+            self._ise_valve_var.set(str(ise_valve))
         if leakrate_phase_reduction is not None:
             self._leakrate_phase_reduction_var.set(str(leakrate_phase_reduction))
 
@@ -1043,8 +1097,13 @@ class ReactorApp(tk.Tk):
             "write_condensed_json": self._write_condensed_json_var.get(),
             "add_temperature": self._add_temperature_var.get(),
             "temperature_directory": self._temperature_directory_var.get().strip(),
-            "temperature_file": self._temperature_file_var.get().strip(),
+            "temperature_file": (
+                self._temperature_file_paths
+                if self._temperature_file_paths
+                else self._temperature_file_var.get().strip()
+            ),
             "temperature_source_mode": self._temperature_source_mode.get(),
+            "ise_valve": self._ise_valve_var.get().strip() or "Valve7",
             "leakrate_phase_reduction": self._leakrate_phase_reduction_var.get().strip(),
         }
 
@@ -1216,6 +1275,8 @@ class ReactorApp(tk.Tk):
 
     def _temperature_source_path(self):
         if self._temperature_source_mode.get() == "file":
+            if self._temperature_file_paths:
+                return list(self._temperature_file_paths)
             return self._temperature_file_var.get().strip()
         return self._temperature_directory_var.get().strip()
 
@@ -1230,33 +1291,84 @@ class ReactorApp(tk.Tk):
         self._detect_temperature_zones()
 
     def _detect_temperature_zones(self):
+        """
+        Refresh the temperature-zone checkboxes. The underlying data load
+        (``load_temperature_data``) can be slow for large/deep log
+        directories -- especially cloud-synced folders (OneDrive, etc.)
+        where files may need to be downloaded on first access -- so this
+        runs on a background thread instead of blocking the GUI/Tk event
+        loop (which previously made the whole window appear frozen with
+        "inactive" buttons while a large temperature source was scanned,
+        including once at startup while restoring the last-used source).
+        """
         for child in self._temperature_zones_frame.winfo_children():
             child.destroy()
+        plot_zone_frame = getattr(self, "_plot_temperature_zones_frame", None)
+        if plot_zone_frame is not None:
+            for child in plot_zone_frame.winfo_children():
+                child.destroy()
         self._temperature_zones_vars.clear()
+        self._plot_temperature_zones_vars.clear()
         self._temperature_detected_interval_var.set("")
+
+        self._temperature_zone_detect_token = getattr(self, "_temperature_zone_detect_token", 0) + 1
+        token = self._temperature_zone_detect_token
+
         if not self._add_temperature_var.get():
             return
         source = self._temperature_source_path()
         if not source:
             return
-        try:
-            samples = load_temperature_data(source)
-            zones = temperature_zones(samples)
-        except (OSError, ValueError) as exc:
-            if hasattr(self, "_log_box"):
-                self._log(f"Temperature data warning: {exc}")
+
+        self._temperature_detected_interval_var.set("(detecting temperature zones...)")
+
+        def _worker():
+            try:
+                samples = load_temperature_data(source)
+                zones = temperature_zones(samples)
+                detected_interval = detect_sample_interval_s(samples)
+            except (OSError, ValueError) as exc:
+                error_message = str(exc)
+                self.after(0, lambda: self._apply_detected_temperature_zones(token, None, None, error_message))
+                return
+            self.after(
+                0,
+                lambda: self._apply_detected_temperature_zones(token, zones, detected_interval, None),
+            )
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _apply_detected_temperature_zones(self, token, zones, detected_interval, error):
+        # Ignore results from a stale detection run (e.g. the user switched
+        # the temperature source again before the previous scan finished).
+        if token != getattr(self, "_temperature_zone_detect_token", None):
             return
-        detected_interval = detect_sample_interval_s(samples)
+
+        self._temperature_detected_interval_var.set("")
+        if error is not None:
+            if hasattr(self, "_log_box"):
+                self._log(f"Temperature data warning: {error}")
+            return
+
         if detected_interval:
             self._temperature_detected_interval_var.set(
                 f"(detected: {detected_interval:.1f}s; blank = use all samples)"
             )
+
+        plot_zone_frame = getattr(self, "_plot_temperature_zones_frame", None)
         for index, zone in enumerate(zones):
             var = tk.BooleanVar(value=True)
             self._temperature_zones_vars[zone] = var
             ttk.Checkbutton(
                 self._temperature_zones_frame, text=f"Zone {zone}", variable=var
             ).grid(row=index // 6, column=index % 6, sticky="w", padx=(0, 8))
+        if plot_zone_frame is not None:
+            for index, zone in enumerate(zones):
+                plot_var = tk.BooleanVar(value=True)
+                self._plot_temperature_zones_vars[zone] = plot_var
+                ttk.Checkbutton(
+                    plot_zone_frame, text=f"Zone {zone}", variable=plot_var
+                ).grid(row=index // 4, column=index % 4, sticky="w", padx=(0, 6))
         if zones:
             if hasattr(self, "_log_box"):
                 self._log(f"Detected temperature zones: {', '.join(zones)}")
@@ -1269,12 +1381,13 @@ class ReactorApp(tk.Tk):
             self._refresh_temperature_source()
 
     def _browse_temperature_file(self):
-        path = filedialog.askopenfilename(
-            title="Select Temperature Run Log",
+        paths = filedialog.askopenfilenames(
+            title="Select Temperature Run Logs",
             filetypes=[("Log files", "*.jsonl *.log *.json"), ("All files", "*.*")]
         )
-        if path:
-            self._temperature_file_var.set(path)
+        if paths:
+            self._temperature_file_paths = list(paths)
+            self._temperature_file_var.set("; ".join(self._temperature_file_paths))
             self._temperature_source_mode.set("file")
             self._refresh_temperature_source()
 
@@ -1513,16 +1626,47 @@ class ReactorApp(tk.Tk):
             )
             return
         self._clear_log()
+        self._log(f"Loading header from:\n  {path}")
         try:
-            self._header_info = read_header(path)
-        except Exception as e:
-            self._log(f"ERROR reading header: {e}")
+            size_bytes = os.path.getsize(path)
+            self._log(f"  File size: {size_bytes / (1024 * 1024):.1f} MB")
+        except OSError:
+            pass
+        self._log(
+            "  Reading the first line of the file now -- this can take a "
+            "while (with no further output) if the file lives in a cloud-"
+            "synced folder (OneDrive, etc.) and has to be downloaded first."
+        )
+        self._load_header_btn.config(state="disabled")
+        threading.Thread(target=self._run_load_header, args=(path,), daemon=True).start()
+
+    def _run_load_header(self, path: str):
+        """Worker -- the actual (potentially slow) file read happens here so
+        the GUI stays responsive and the log messages above are visible
+        immediately instead of appearing to hang."""
+        try:
+            header_info = read_header(path)
+        except Exception as exc:
+            error_message = str(exc)
+            self.after(0, lambda: self._finish_load_header(path, None, error_message))
+            return
+        self.after(0, lambda: self._finish_load_header(path, header_info, None))
+
+    def _finish_load_header(self, path: str, header_info: dict | None, error: str | None):
+        self._load_header_btn.config(state="normal")
+        if error is not None:
+            self._log(f"ERROR reading header: {error}")
             return
 
+        if self._file_path.get().strip() != path:
+            return
+        self._ise_file_path.set("")
+        self._header_info = header_info
+        self._update_header_alignment_warning(path, header_info)
         vs = self._header_info.get("valveSequence", [])
         self._seq_dict = convert_sequence(vs)
 
-        self._log(f"Loading:  {path}")
+        self._log("Header read successfully.")
         self._log(self._format_timing_table(self._seq_dict))
         for sk, sd in self._seq_dict.items():
             seen_v: list[str] = []
@@ -1549,6 +1693,7 @@ class ReactorApp(tk.Tk):
         self._run_all_btn.config(state="normal")
         self._label_btn.config(state="disabled")
         self._attach_temp_btn.config(state="disabled")
+        self._attach_ise_btn.config(state="disabled")
         self._generate_btn.config(state="disabled")
         self._preview_btn.config(state="normal")
         self._edit_header_btn.config(state="normal")
@@ -1561,6 +1706,18 @@ class ReactorApp(tk.Tk):
             raise ValueError("Raw data file is empty.")
 
         first = json.loads(lines[0])
+        existing_payload = first.get("payload", {})
+        if (
+            isinstance(existing_payload, dict)
+            and isinstance(existing_payload.get("startTime"), str)
+            and existing_payload["startTime"].strip()
+            and (
+                not isinstance(payload.get("startTime"), str)
+                or not payload["startTime"].strip()
+            )
+        ):
+            payload = dict(payload)
+            payload["startTime"] = existing_payload["startTime"]
         first["payload"] = payload
         updated_lines = [json.dumps(first, ensure_ascii=False) + "\n"]
         updated_lines.extend(lines[1:])
@@ -1584,24 +1741,88 @@ class ReactorApp(tk.Tk):
         edited = open_header_editor(
             self,
             self._header_info,
+            path,
             header_text_path,
             regenerate_callback=self._regenerate_header_from_recipe_sheet,
         )
         if edited is None:
             return
 
-        save_text = bool(edited.pop("__save_header_text__", False))
-        if save_text and not os.path.isfile(header_text_path):
-            header_text_path = filedialog.askopenfilename(
-                title="Select Header Text File to Update",
-                filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
-                parent=self,
+        while True:
+            save_text = bool(edited.pop("__save_header_text__", False))
+            auto_username = bool(edited.pop("__auto_username__", True))
+            if save_text and not os.path.isfile(header_text_path):
+                header_text_path = filedialog.askopenfilename(
+                    title="Select Header Text File to Update",
+                    filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+                    parent=self,
+                )
+                if not header_text_path:
+                    self._log("Header update cancelled: no header text file selected.")
+                    return
+                self._header_txt_path.set(header_text_path)
+            artifacts = associated_header_artifacts(
+                path,
+                str(edited.get("username", "")),
+                header_text_path,
             )
-            if not header_text_path:
-                self._log("Header update cancelled: no header text file selected.")
-                return
-            self._header_txt_path.set(header_text_path)
+            artifact_entries = {}
+            seen_sources = set()
+            for key in ("selected", "header_text", "raw", "condensed", "data_text"):
+                item = artifacts[key]
+                source = item["current"]
+                if source.resolve() in seen_sources:
+                    continue
+                seen_sources.add(source.resolve())
+                artifact_entries[key] = (
+                    source,
+                    item["expected"],
+                )
+            existing_artifacts = list({
+                source.resolve(): source
+                for source, _destination in artifact_entries.values()
+                if source.is_file()
+            }.values())
+            rename = False
+            mismatches = [
+                entry for entry in artifact_entries.values()
+                if entry[0].is_file() and entry[0].resolve() != entry[1].resolve()
+            ]
+            if mismatches:
+                choice, include_associated = self._prompt_artifact_alignment(artifact_entries)
+                if choice == "cancel":
+                    edited = open_header_editor(
+                        self,
+                        edited,
+                        path,
+                        header_text_path,
+                        regenerate_callback=self._regenerate_header_from_recipe_sheet,
+                        initial_auto_username=auto_username,
+                        initial_save_header_text=save_text,
+                    )
+                    if edited is None:
+                        return
+                    continue
+                rename = choice == "rename"
+                if rename and not include_associated:
+                    mismatches = [
+                        entry for key, entry in artifact_entries.items()
+                        if key in {"selected", "header_text"}
+                        and entry[0].is_file()
+                        and entry[0].resolve() != entry[1].resolve()
+                    ]
+                elif not rename:
+                    mismatches = []
+            break
+
         try:
+            self._check_artifact_permissions(existing_artifacts)
+            if rename:
+                self._rename_artifacts(mismatches)
+                path = str(artifacts["selected"]["expected"])
+                header_text_path = str(artifacts["header_text"]["expected"])
+                self._file_path.set(path)
+                self._header_txt_path.set(header_text_path)
             self._rewrite_header_payload(path, edited)
             if save_text:
                 if not header_text_path or not os.path.isfile(header_text_path):
@@ -1613,6 +1834,145 @@ class ReactorApp(tk.Tk):
 
         self._log("Header updated.")
         self._load_header()
+
+    def _reactor_data_relative(self, path: Path) -> str:
+        for parent in (path, *path.parents):
+            if parent.name.casefold() == "reactor data":
+                try:
+                    return str(path.relative_to(parent))
+                except ValueError:
+                    break
+        return str(path)
+
+    def _update_header_alignment_warning(self, raw_path: str, payload: dict):
+        username = str(payload.get("username", "")).strip()
+        artifacts = associated_header_artifacts(raw_path, username, self._header_txt_path.get().strip())
+        mismatches = list({
+            (item["current"].resolve(), item["expected"].resolve())
+            for item in artifacts.values()
+            if item["current"].is_file()
+            and item["current"].resolve() != item["expected"].resolve()
+        })
+        if mismatches:
+            self._header_alignment_warning_var.set(
+                "Warning: filename and username do not match. "
+                "Open Edit Header to align them."
+            )
+        else:
+            self._header_alignment_warning_var.set("")
+
+    def _check_artifact_permissions(self, paths: list[Path]):
+        denied = []
+        for path in paths:
+            try:
+                with path.open("r+", encoding=None):
+                    pass
+            except PermissionError:
+                denied.append(self._reactor_data_relative(path))
+        if denied:
+            raise PermissionError(
+                "Close the following in-use files before saving:\n\n"
+                + "\n".join(denied)
+            )
+
+    def _rename_artifacts(self, mismatches: list[tuple[Path, Path]]):
+        destinations = {}
+        sources = {source.resolve() for source, _ in mismatches}
+        for source, destination in mismatches:
+            destination_key = destination.resolve()
+            if destination_key in destinations or (
+                destination.exists() and destination_key not in sources
+            ):
+                raise FileExistsError(
+                    f"Cannot rename {source.name}: destination already exists ({destination.name})."
+                )
+            destinations[destination_key] = source
+        for source, destination in mismatches:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            source.rename(destination)
+
+    def _prompt_artifact_alignment(self, artifact_entries) -> tuple[str, bool]:
+        popup = tk.Toplevel(self)
+        popup.title("Align Header Artifact Names")
+        popup.geometry("1000x560")
+        popup.resizable(False, False)
+        popup.transient(self)
+        popup.grab_set()
+        ttk.Label(
+            popup,
+            text=(
+                "The username and artifact filenames do not match.\n"
+                "Choose whether to rename the existing artifacts."
+            ),
+            justify="left",
+        ).pack(anchor="w", padx=12, pady=(12, 8))
+        include_associated_var = tk.BooleanVar(value=True)
+        paths_frame = ttk.Frame(popup)
+        paths_frame.pack(fill="x", padx=12, pady=(0, 10))
+
+        def display_entries():
+            return [
+                entry for key, entry in artifact_entries.items()
+                if entry[0].is_file()
+                and entry[0].resolve() != entry[1].resolve()
+                and (include_associated_var.get() or key in {"selected", "header_text"})
+            ]
+
+        def render_paths(*_args):
+            for child in paths_frame.winfo_children():
+                child.destroy()
+            bold_font = ("Segoe UI", 9, "bold")
+            ttk.Label(paths_frame, text="Existing paths", font=bold_font).grid(
+                row=0, column=0, sticky="w"
+            )
+            entries = display_entries()
+            for row, (source, _destination) in enumerate(entries, start=1):
+                ttk.Label(
+                    paths_frame,
+                    text=self._reactor_data_relative(source),
+                    justify="left",
+                ).grid(row=row, column=0, sticky="w", pady=1)
+            renamed_row = len(entries) + 1
+            ttk.Label(paths_frame, text="Renamed paths", font=bold_font).grid(
+                row=renamed_row, column=0, sticky="w", pady=(8, 0)
+            )
+            for row, (_source, destination) in enumerate(entries, start=renamed_row + 1):
+                ttk.Label(
+                    paths_frame,
+                    text=self._reactor_data_relative(destination),
+                    justify="left",
+                ).grid(row=row, column=0, sticky="w", pady=1)
+
+        ttk.Checkbutton(
+            popup,
+            text="Rename associated files",
+            variable=include_associated_var,
+            command=render_paths,
+        ).pack(anchor="w", padx=12, pady=(0, 6))
+        render_paths()
+        choice = {"value": "cancel", "include_associated": True}
+        buttons = ttk.Frame(popup)
+        buttons.pack(fill="x", padx=12, pady=(0, 12))
+
+        def finish(value):
+            choice["value"] = value
+            choice["include_associated"] = include_associated_var.get()
+            popup.destroy()
+
+        ttk.Button(
+            buttons,
+            text="Save and align filenames",
+            command=lambda: finish("rename"),
+        ).pack(side="left")
+        ttk.Button(
+            buttons,
+            text="Save and do not align filenames",
+            command=lambda: finish("keep"),
+        ).pack(side="left", padx=6)
+        ttk.Button(buttons, text="Cancel", command=lambda: finish("cancel")).pack(side="right")
+        popup.protocol("WM_DELETE_WINDOW", lambda: finish("cancel"))
+        self.wait_window(popup)
+        return choice["value"], choice["include_associated"]
 
     def _regenerate_header_from_recipe_sheet(self):
         recipe_path = filedialog.askopenfilename(
@@ -1644,11 +2004,14 @@ class ReactorApp(tk.Tk):
                 recipe_df,
                 username=filename_report["sanitized"] if filename_report else None,
             )
-            return {
+            regenerated = {
                 "username": recipe_payload["username"],
                 "experimentalDetails": recipe_payload["experimentalDetails"],
                 "valveSequence": recipe_payload["recipe"],
             }
+            preserved = dict(self._header_info)
+            preserved.update(regenerated)
+            return preserved
         except Exception as exc:
             messagebox.showerror(
                 "Regenerate Header",
@@ -1737,6 +2100,10 @@ class ReactorApp(tk.Tk):
         self._persist_processing_preferences(valve_names)
 
         temperature_interval = self._get_float(self._temperature_sample_interval_var)
+        ise_first_cycle = self._get_float(self._ise_first_cycle_var)
+        if ise_first_cycle is None or ise_first_cycle < 0:
+            self._log("ERROR: iSE first cycle must be a non-negative number.")
+            return None
 
         return ProcessingOptions(
             valve_names=valve_names,
@@ -1751,12 +2118,18 @@ class ReactorApp(tk.Tk):
             leakrate_phase_reduction=leakrate_phase_reduction,
             write_condensed_json=self._write_condensed_json_var.get(),
             add_temperature=self._add_temperature_var.get(),
+            add_ise=self._run_all_attach_ise_var.get(),
             temperature_source=self._temperature_source_path(),
             selected_temperature_zones=[
                 zone for zone, var in self._temperature_zones_vars.items() if var.get()
             ],
             temperature_sample_interval_s=temperature_interval,
+            plot_temperature_zones=[
+                zone for zone, var in self._plot_temperature_zones_vars.items() if var.get()
+            ] if self._plot_temperature_zones_vars else None,
             ise_file_path=self._ise_file_path.get().strip(),
+            ise_valve=self._ise_valve_var.get().strip() or "Valve7",
+            ise_first_cycle=ise_first_cycle,
             thickness_blank_rows=thickness_blank_rows,
             fps=fps,
         )
@@ -1804,6 +2177,7 @@ class ReactorApp(tk.Tk):
         self._condense_btn.config(state=state)
         self._label_btn.config(state=state)
         self._attach_temp_btn.config(state=state)
+        self._attach_ise_btn.config(state=state)
         self._generate_btn.config(state=state)
         self._run_all_btn.config(state=state)
         self._preview_btn.config(state=state)
@@ -1821,6 +2195,7 @@ class ReactorApp(tk.Tk):
             )
             self._label_btn.config(state=downstream_state)
             self._attach_temp_btn.config(state=downstream_state)
+            self._attach_ise_btn.config(state=downstream_state)
             self._generate_btn.config(state=downstream_state)
         self.after(0, _re_enable)
 
@@ -1860,8 +2235,7 @@ class ReactorApp(tk.Tk):
 
     def _run_label_phases(self):
         try:
-            self._pipeline.label_phases(log_cb=self._log)
-            self._set_progress(100)
+            self._pipeline.label_phases(progress_cb=self._set_progress, log_cb=self._log)
         except SaveAbortedError as exc:
             self._log(f"Save cancelled: {exc}")
         except Exception as exc:
@@ -1886,6 +2260,28 @@ class ReactorApp(tk.Tk):
             self._log(f"Save cancelled: {exc}")
         except Exception as exc:
             self._log(f"Attach temperature ERROR: {exc}")
+        finally:
+            self._finish_processing_ui()
+
+    # -- Step 4: Attach iSE thickness data (optional) ------------------------
+
+    def _start_attach_ise(self):
+        pipeline = self._ensure_pipeline()
+        if pipeline is None:
+            return
+        self._run_all_attach_ise_var.set(True)
+        pipeline.options.add_ise = True
+        self._set_step_buttons_state("disabled")
+        self._set_progress(0)
+        threading.Thread(target=self._run_attach_ise, daemon=True).start()
+
+    def _run_attach_ise(self):
+        try:
+            self._pipeline.attach_ise(progress_cb=self._set_progress, log_cb=self._log)
+        except SaveAbortedError as exc:
+            self._log(f"Save cancelled: {exc}")
+        except Exception as exc:
+            self._log(f"Attach iSE ERROR: {exc}")
         finally:
             self._finish_processing_ui()
 
@@ -1930,7 +2326,12 @@ class ReactorApp(tk.Tk):
             self._log(f"\n-- {pipeline.raw_path.name}")
             if pipeline.options.wait_time > 0:
                 self._log(f"   Trimming first {pipeline.options.wait_time:.0f} s (wait time)")
-            pipeline.run_all(progress_cb=self._set_progress, log_cb=self._log)
+            pipeline.run_all(
+                progress_cb=self._set_progress,
+                log_cb=self._log,
+                attach_temperature=self._run_all_attach_temperature_var.get(),
+                attach_ise=self._run_all_attach_ise_var.get(),
+            )
         except SaveAbortedError as exc:
             self._log(f"Save cancelled: {exc}")
         except ImportError:

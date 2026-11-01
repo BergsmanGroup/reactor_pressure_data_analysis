@@ -51,6 +51,25 @@ Reviewed the rest of the staged pipeline (`pipeline.py`, `data_parser.py`, `plot
 
 ## 3. Where to put "detailed iSE" (thickness) data today
 
+The implemented workflow now treats iSE thickness attachment as its own
+optional Stage 4, immediately after optional temperature attachment (Stage 3).
+The GUI's **Run All** row provides independent `attach temperature data` and
+`attach iSE data` checkboxes, and the staged controls expose
+**4. Attach iSE Data (optional)**. When enabled, Stage 4 loads and
+cycle-aligns the iSE readings before plots and cycle summaries are generated.
+When disabled, plot generation does not include iSE thickness annotations or
+write the thickness CSV.
+
+Plot and animation outputs are also written with an atomic temporary-file
+replacement. Re-running either **Generate Plots & Animation** or **Run All**
+therefore overwrites existing `cycle_*.png` and `*_animation.gif` files in the
+selected output directory instead of leaving stale artifacts in place.
+
+The iSE valve selector accepts the source-style `ValveN` form. If valve names
+have been customized in the GUI, the pipeline resolves `ValveN` to that
+display name before matching phase occurrences; for example, `Valve7` maps to
+the configured `TDIC` label.
+
 Your instinct against overloading `meta` is correct. Looking at the current condensed-row shape:
 
 ```json

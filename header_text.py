@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 from pathlib import Path
 
 
@@ -31,6 +32,8 @@ def parse_header_text(path: str | Path) -> dict:
             raise ValueError("JSON header text must contain an object.")
         if "valveSequence" not in payload:
             raise ValueError("JSON header text does not contain 'valveSequence'.")
+        if not isinstance(payload.get("startTime"), str) or not payload["startTime"].strip():
+            raise ValueError("JSON header text does not contain a valid 'startTime'.")
         return payload
 
     lines = text.splitlines()
@@ -86,6 +89,73 @@ def converted_json_path(path: str | Path) -> Path:
     """Return the JSON path beside a header text file."""
     source = Path(path)
     return source.with_suffix(".json")
+
+
+def _artifact_name_parts(path: Path) -> tuple[str, str] | None:
+    match = re.fullmatch(
+        r"(?P<prefix>.*__InSituReactor)(?P<username>.*)"
+        r"(?P<suffix>_Reactor\d+_Data)(?:_condensed)?\.json",
+        path.name,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    return match.group("prefix"), match.group("suffix")
+
+
+def associated_header_artifacts(
+    raw_path: str | Path,
+    username: str,
+    header_text_path: str | Path = "",
+) -> dict[str, dict[str, Path]]:
+    """Return current and username-based paths for the related header artifacts."""
+    source = Path(raw_path)
+    parts = _artifact_name_parts(source)
+    if parts is None:
+        return {}
+    prefix, data_suffix = parts
+    selected_condensed = source.stem.casefold().endswith("_condensed")
+    current_stem = source.stem[:-10] if selected_condensed else source.stem
+    expected_stem = f"{prefix}{username}{data_suffix}"
+    json_dir = source.parent
+    if json_dir.name.casefold() == "json files":
+        text_dir = json_dir.parent / "Text Files"
+        date_match = re.match(r"^(?P<date>\d{6})_", source.name)
+        if date_match:
+            try:
+                month_dir = datetime.strptime(
+                    date_match.group("date"), "%y%m%d"
+                ).strftime("%B %Y")
+                text_dir /= month_dir
+            except ValueError:
+                pass
+    else:
+        text_dir = json_dir
+    current_header = Path(header_text_path) if header_text_path else text_dir / f"{current_stem[:-5]}_Header.txt"
+    return {
+        "raw": {
+            "current": source if not selected_condensed else json_dir / f"{current_stem}.json",
+            "expected": json_dir / f"{expected_stem}.json",
+        },
+        "condensed": {
+            "current": json_dir / f"{current_stem}_condensed.json",
+            "expected": json_dir / f"{expected_stem}_condensed.json",
+        },
+        "data_text": {
+            "current": text_dir / f"{current_stem}.txt",
+            "expected": text_dir / f"{expected_stem}.txt",
+        },
+        "header_text": {
+            "current": current_header,
+            "expected": text_dir / f"{expected_stem[:-5]}_Header.txt",
+        },
+        "selected": {
+            "current": source,
+            "expected": json_dir / (
+                f"{expected_stem}{'_condensed' if selected_condensed else ''}.json"
+            ),
+        },
+    }
 
 
 def format_human_json(value, level: int = 0) -> str:

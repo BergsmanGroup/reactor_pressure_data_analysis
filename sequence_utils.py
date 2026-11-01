@@ -14,6 +14,41 @@ import numpy as np
 PHASE_TYPES = ["prepump", "dosepump", "dosen2", "dose", "hold", "prepurge", "purge"]
 
 
+def _coerce_int(value, default: int = 0) -> int:
+    """
+    Best-effort int conversion for valveSequence cells.
+
+    Header rows produced by the recipe-sheet converter intentionally leave
+    the cycle-count cell as an empty string for "continuation" rows (append
+    this valve to the current sequence) rather than the literal ``"0"`` --
+    see ``convert_to_json.extract_timing_table``. Treat any blank/None/
+    non-numeric cell the same way ``0`` is already treated here instead of
+    raising, since that's the documented meaning of a blank cell.
+    """
+    if value is None:
+        return default
+    text = str(value).strip()
+    if not text:
+        return default
+    try:
+        return int(float(text))
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_float(value, default: float = 0.0) -> float:
+    """Best-effort float conversion for valveSequence timing cells (see _coerce_int)."""
+    if value is None:
+        return default
+    text = str(value).strip()
+    if not text:
+        return default
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return default
+
+
 # =============================================================================
 #  Sequence structure helpers
 # =============================================================================
@@ -38,9 +73,9 @@ def convert_sequence(valve_sequence: list) -> dict:
     for row in valve_sequence:
         if not any(row):
             continue
-        cycle_count = int(row[0])
-        valve_num   = int(row[1])
-        timing_vals = list(row[2:2 + len(PHASE_TYPES)])
+        cycle_count = _coerce_int(row[0])
+        valve_num   = _coerce_int(row[1])
+        timing_vals = [_coerce_float(v) for v in row[2:2 + len(PHASE_TYPES)]]
         timing      = timing_vals + [0] * (len(PHASE_TYPES) - len(timing_vals))
 
         if cycle_count == 0:

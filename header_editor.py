@@ -8,9 +8,13 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import tkinter as tk
 from tkinter import ttk
 from typing import Callable
+from pathlib import Path
+
+from header_text import associated_header_artifacts
 
 DETAIL_SCALAR_FIELDS = [
     ("Info", "Info", "text"),
@@ -187,8 +191,11 @@ class HeaderEditorDialog(tk.Toplevel):
         self,
         parent,
         payload: dict,
+        raw_file_path: str = "",
         header_text_path: str = "",
         regenerate_callback: Callable[[], dict | None] | None = None,
+        initial_auto_username: bool = True,
+        initial_save_header_text: bool = True,
     ):
         super().__init__(parent)
         self.title("Edit Header")
@@ -199,6 +206,7 @@ class HeaderEditorDialog(tk.Toplevel):
 
         self.result: dict | None = None
         self._payload = copy.deepcopy(payload) if isinstance(payload, dict) else {}
+        self._raw_file_path = raw_file_path
         self._header_text_path = header_text_path
         self._regenerate_callback = regenerate_callback
         self._details_structured, self._details_value = _extract_details(self._payload)
@@ -209,11 +217,13 @@ class HeaderEditorDialog(tk.Toplevel):
         self._detail_table_vars: list[dict[str, tk.StringVar]] = []
         self._table_rows: list[dict] = []
         self._selected_table_row: int | None = None
+        self._auto_username_var = tk.BooleanVar(value=initial_auto_username)
+        self._initial_save_header_text = initial_save_header_text
 
         self._build_ui()
         self._populate_from_payload()
         self._saved_editor_state = self._editor_state()
-        self.bind("<KeyRelease>", lambda _event: self._update_unsaved_warning())
+        self.bind("<KeyRelease>", self._on_key_release)
 
         self.protocol("WM_DELETE_WINDOW", self._on_cancel)
         self.bind("<Escape>", lambda _event: self._on_cancel())
@@ -248,17 +258,33 @@ class HeaderEditorDialog(tk.Toplevel):
 
         top_frame = ttk.LabelFrame(outer, text="Top-Level Header", padding=8)
         top_frame.pack(fill="x", pady=(0, 8))
-        ttk.Label(top_frame, text="Username").grid(row=0, column=0, sticky="w", padx=(0, 6), pady=3)
-        self._username_var = tk.StringVar()
-        ttk.Entry(top_frame, textvariable=self._username_var, width=80).grid(
-            row=0, column=1, sticky="ew", pady=3
+        self._artifact_paths_label = ttk.Label(top_frame, text="", justify="left")
+        self._artifact_paths_label.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 6))
+        self._alignment_warning_label = tk.Label(
+            top_frame,
+            text="",
+            foreground="red",
+            anchor="w",
+            justify="left",
         )
+        self._alignment_warning_label.grid(row=3, column=0, columnspan=3, sticky="w", pady=(3, 0))
+        ttk.Label(top_frame, text="Username").grid(row=1, column=0, sticky="w", padx=(0, 6), pady=3)
+        self._username_var = tk.StringVar()
+        self._username_entry = ttk.Entry(top_frame, textvariable=self._username_var, width=60)
+        self._username_entry.grid(row=1, column=1, sticky="ew", pady=3)
+        ttk.Checkbutton(
+            top_frame,
+            text="Auto-generate from header fields",
+            variable=self._auto_username_var,
+            command=self._username_mode_changed,
+        ).grid(row=1, column=2, sticky="w", padx=(8, 0), pady=3)
         top_frame.columnconfigure(1, weight=1)
+        self._update_artifact_paths_label()
 
         details_frame = ttk.LabelFrame(outer, text="Experimental Details", padding=8)
         details_frame.pack(fill="x", pady=(0, 8))
 
-        self._save_header_text_var = tk.BooleanVar(value=False)
+        self._save_header_text_var = tk.BooleanVar(value=self._initial_save_header_text)
         self._build_experimental_details(details_frame)
 
         table_frame = ttk.LabelFrame(outer, text="Timing Table", padding=8)
@@ -321,7 +347,11 @@ class HeaderEditorDialog(tk.Toplevel):
             ttk.Label(form, text=left_label).grid(row=row, column=0, sticky="w", padx=(0, 6), pady=3)
             self._field_vars[left_key] = tk.BooleanVar(value=False) if left_kind == "checkbox" else tk.StringVar()
             if left_kind == "checkbox":
-                ttk.Checkbutton(form, variable=self._field_vars[left_key]).grid(row=row, column=1, sticky="w", pady=3)
+                ttk.Checkbutton(
+                    form,
+                    variable=self._field_vars[left_key],
+                    command=self._on_details_checkbox_changed,
+                ).grid(row=row, column=1, sticky="w", pady=3)
             else:
                 ttk.Entry(form, textvariable=self._field_vars[left_key], width=28).grid(
                     row=row, column=1, sticky="ew", pady=3
@@ -330,7 +360,11 @@ class HeaderEditorDialog(tk.Toplevel):
             ttk.Label(form, text=right_label).grid(row=row, column=2, sticky="w", padx=(16, 6), pady=3)
             self._field_vars[right_key] = tk.BooleanVar(value=False) if right_kind == "checkbox" else tk.StringVar()
             if right_kind == "checkbox":
-                ttk.Checkbutton(form, variable=self._field_vars[right_key]).grid(row=row, column=3, sticky="w", pady=3)
+                ttk.Checkbutton(
+                    form,
+                    variable=self._field_vars[right_key],
+                    command=self._on_details_checkbox_changed,
+                ).grid(row=row, column=3, sticky="w", pady=3)
             else:
                 ttk.Entry(form, textvariable=self._field_vars[right_key], width=28).grid(
                     row=row, column=3, sticky="ew", pady=3
@@ -455,6 +489,145 @@ class HeaderEditorDialog(tk.Toplevel):
         self._username_var.set(self._username_original)
         self._populate_details_fields()
         self._reset_table_rows()
+        self._username_entry.configure(state="disabled")
+        self._update_artifact_paths_label()
+
+    def _base_username(self) -> str:
+        username = self._username_original
+        match = re.search(r"(?:&|_)(?:EDR|DID|SID|EID|PID)", username, flags=re.IGNORECASE)
+        return username[:match.start()] if match else username
+
+    def _generated_username(self) -> str:
+        details = self._build_details_payload()
+        parts = [self._base_username()]
+        parts.append("EDRTrue" if details.get("EDR") else "EDRNaN")
+
+        did_values = details.get("DID", [])
+        if not isinstance(did_values, list):
+            did_values = [did_values]
+        did_values = [
+            self._filename_token(value)
+            for value in did_values
+            if self._filename_token(value) not in {"", "0", "NaN"}
+        ]
+        if did_values:
+            parts.append("DID" + "-".join(did_values))
+
+        active_valves = set()
+        for row in self._collect_table_rows():
+            if len(row) <= 1:
+                continue
+            try:
+                active_valves.add(int(float(row[1])))
+            except (TypeError, ValueError):
+                continue
+        valve_numbers = details.get("ValvePrecursor", [])
+        valve_names = details.get("Name", [])
+        temperatures = details.get("TempC", [])
+        if isinstance(valve_numbers, list) and isinstance(valve_names, list):
+            for index, name in enumerate(valve_names):
+                valve_number = valve_numbers[index] if index < len(valve_numbers) else ""
+                if not self._is_nan_token(valve_number):
+                    try:
+                        if int(float(valve_number)) not in active_valves:
+                            continue
+                    except (TypeError, ValueError):
+                        continue
+                temperature = temperatures[index] if index < len(temperatures) else "NaN"
+                parts.append(f"{self._filename_token(name)}{self._filename_token(temperature)}")
+
+        generated = "_".join(part for part in parts if part)
+        return re.sub(r'[<>:"/\\|?*]', "_", generated).strip()
+
+    @staticmethod
+    def _is_nan_token(value) -> bool:
+        return str(value).strip().casefold() in {"", "nan", "none"}
+
+    @classmethod
+    def _filename_token(cls, value) -> str:
+        if cls._is_nan_token(value):
+            return "NaN" if value not in ("", None) else ""
+        try:
+            number = float(value)
+            if number.is_integer():
+                return str(int(number))
+        except (TypeError, ValueError):
+            pass
+        return str(value).strip()
+
+    def _refresh_generated_username(self):
+        if self._auto_username_var.get():
+            self._username_var.set(self._generated_username())
+        self._update_artifact_paths_label()
+
+    def _on_details_checkbox_changed(self):
+        self._refresh_generated_username()
+        self._update_unsaved_warning()
+
+    def _on_key_release(self, _event):
+        self._refresh_generated_username()
+        self._update_unsaved_warning()
+
+    def _username_mode_changed(self):
+        self._username_entry.configure(state="disabled" if self._auto_username_var.get() else "normal")
+        self._refresh_generated_username()
+        self._update_unsaved_warning()
+
+    def _update_artifact_paths_label(self):
+        if not self._raw_file_path:
+            self._artifact_paths_label.configure(text="Associated artifact paths unavailable for this file.")
+            self._alignment_warning_label.configure(text="")
+            return
+        artifacts = associated_header_artifacts(
+            self._raw_file_path,
+            self._username_original,
+            self._header_text_path,
+        )
+        if not artifacts:
+            self._artifact_paths_label.configure(text="Associated artifact paths unavailable for this filename.")
+            self._alignment_warning_label.configure(text="")
+            return
+        paths = []
+        seen = set()
+        for key in ("raw", "condensed", "data_text", "header_text"):
+            item = artifacts[key]
+            current = item["current"]
+            if not current.is_file() or current.resolve() in seen:
+                continue
+            seen.add(current.resolve())
+            paths.append(self._relative_to_reactor_data(current))
+        if paths:
+            self._artifact_paths_label.configure(text="Existing associated paths:\n" + "\n".join(paths))
+        else:
+            self._artifact_paths_label.configure(text="No associated artifact files found.")
+        alignment_artifacts = associated_header_artifacts(
+            self._raw_file_path,
+            self._username_var.get().strip(),
+            self._header_text_path,
+        )
+        mismatched = any(
+            item["current"].is_file()
+            and item["current"].resolve() != item["expected"].resolve()
+            for key, item in alignment_artifacts.items()
+            if key != "selected"
+        )
+        self._alignment_warning_label.configure(
+            text=(
+                "Warning: username and filenames do not match; "
+                "this can be aligned during the save process."
+                if mismatched
+                else ""
+            )
+        )
+
+    def _relative_to_reactor_data(self, path: Path) -> str:
+        for parent in (path, *path.parents):
+            if parent.name.casefold() == "reactor data":
+                try:
+                    return str(path.relative_to(parent))
+                except ValueError:
+                    break
+        return str(path)
 
     def _set_original_values(self):
         self._details_structured, self._details_value = _extract_details(self._payload)
@@ -476,7 +649,9 @@ class HeaderEditorDialog(tk.Toplevel):
         regenerated = self._regenerate_callback() if self._regenerate_callback is not None else None
         if not isinstance(regenerated, dict):
             return
-        self._payload = copy.deepcopy(regenerated)
+        preserved = copy.deepcopy(self._payload)
+        preserved.update(copy.deepcopy(regenerated))
+        self._payload = preserved
         self._set_original_values()
         self._save_details_as_json_var.set(self._details_structured)
         self._populate_from_payload()
@@ -502,6 +677,7 @@ class HeaderEditorDialog(tk.Toplevel):
                 "valveSequence": self._collect_table_rows(),
                 "saveDetailsAsJson": self._save_details_as_json_var.get(),
                 "saveHeaderText": self._save_header_text_var.get(),
+                "autoUsername": self._auto_username_var.get(),
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -669,6 +845,7 @@ class HeaderEditorDialog(tk.Toplevel):
         payload["valveSequence"] = self._collect_table_rows()
         self.result = payload
         self.result["__save_header_text__"] = self._save_header_text_var.get()
+        self.result["__auto_username__"] = self._auto_username_var.get()
         self._saved_editor_state = self._editor_state()
         self.destroy()
 
@@ -680,9 +857,20 @@ class HeaderEditorDialog(tk.Toplevel):
 def open_header_editor(
     parent,
     payload: dict,
+    raw_file_path: str = "",
     header_text_path: str = "",
     regenerate_callback: Callable[[], dict | None] | None = None,
+    initial_auto_username: bool = True,
+    initial_save_header_text: bool = True,
 ):
-    dialog = HeaderEditorDialog(parent, payload, header_text_path, regenerate_callback)
+    dialog = HeaderEditorDialog(
+        parent,
+        payload,
+        raw_file_path,
+        header_text_path,
+        regenerate_callback,
+        initial_auto_username,
+        initial_save_header_text,
+    )
     parent.wait_window(dialog)
     return dialog.result

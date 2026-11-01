@@ -44,14 +44,33 @@ def _to_numeric_tokens(parts: list[str]) -> list[float]:
 def parse_ise_thickness(ise_csv_path: str | Path) -> list[float]:
     """Return thickness values parsed from an iSE CSV export."""
     path = Path(ise_csv_path)
-    lines = path.read_text(encoding="utf-8-sig", errors="ignore").splitlines()
-    if len(lines) <= 2:
+    if path.suffix.casefold() in {".xlsx", ".xls"}:
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8-sig", errors="ignore").splitlines()
+    except (OSError, UnicodeError):
+        return []
+    if not lines:
         return []
 
     thickness_vals: list[float] = []
+    header_index = None
+    thickness_index = None
+    for index, raw in enumerate(lines[:5]):
+        try:
+            row = next(csv.reader([raw]))
+        except csv.Error:
+            continue
+        for column, value in enumerate(row):
+            if value.strip().casefold().startswith("thickness"):
+                header_index = index
+                thickness_index = column
+                break
+        if thickness_index is not None:
+            break
 
-    # Skip two header rows by file convention.
-    for raw in lines[2:]:
+    start_index = header_index + 1 if header_index is not None else min(2, len(lines))
+    for raw in lines[start_index:]:
         line = raw.strip()
         if not line:
             continue
@@ -63,11 +82,76 @@ def parse_ise_thickness(ise_csv_path: str | Path) -> list[float]:
             parsed_rows = list(csv.reader([line]))
             parts = parsed_rows[0] if parsed_rows else []
 
+        if thickness_index is not None and thickness_index < len(parts):
+            try:
+                value = float(parts[thickness_index].strip().strip('"'))
+            except ValueError:
+                continue
+            if math.isfinite(value):
+                thickness_vals.append(value)
+            continue
+
         nums = _to_numeric_tokens(parts)
-        if len(nums) >= 2:
+        if len(nums) >= 2 and math.isfinite(nums[1]):
             thickness_vals.append(nums[1])
 
     return thickness_vals
+
+
+def map_ise_thickness_to_cycles(
+    thickness_values: list[float],
+    cycles: list[int],
+    cycle_sequence_map: dict[int, str],
+    phased_sequences: dict,
+    ise_valve: str = "Valve7",
+    first_cycle: float = 1.0,
+) -> dict[int, dict[str, list]]:
+    """Assign sequential iSE readings to occurrences of *ise_valve*.
+
+    Every cycle receives the maximum number of valve-occurrence rows found in
+    the recipe. Missing readings are represented by ``None`` so figure
+    summaries can render them as ``NaN``.
+    """
+    target = str(ise_valve).strip()
+    start_cycle = int(math.floor(first_cycle))
+    start_instance = 1 if first_cycle - start_cycle >= 0.5 else 0
+
+    instances_by_cycle: dict[int, int] = {}
+    for cycle in cycles:
+        if cycle < start_cycle:
+            continue
+        seq_key = cycle_sequence_map.get(cycle)
+        valve_rows = phased_sequences.get(seq_key, {}).get("valve_rows", [])
+        instances_by_cycle[cycle] = sum(
+            1 for valve, _timing in valve_rows if str(valve) == target
+        )
+
+    max_instances = max(instances_by_cycle.values(), default=0)
+    if max_instances == 0:
+        return {}
+
+    values_by_slot: dict[tuple[int, int], float] = {}
+    value_index = 0
+    for cycle in cycles:
+        count = instances_by_cycle.get(cycle, 0)
+        first_instance = start_instance if cycle == start_cycle else 0
+        for instance in range(first_instance, count):
+            if value_index >= len(thickness_values):
+                break
+            values_by_slot[(cycle, instance)] = thickness_values[value_index]
+            value_index += 1
+
+    return {
+        cycle: {
+            "Cycle": [cycle + 0.5 * instance for instance in range(max_instances)],
+            "ThicknessNm": [
+                values_by_slot.get((cycle, instance))
+                for instance in range(max_instances)
+            ],
+        }
+        for cycle in cycles
+        if cycle >= start_cycle
+    }
 
 
 def save_ise_thickness_csv(
