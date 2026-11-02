@@ -1,0 +1,441 @@
+{
+  "sequence": {
+    "seq1": {
+      "cycles": 1,
+      "valve_rows": [
+        [
+          7,
+          [
+            0.0,
+            15.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            10.0
+          ]
+        ]
+      ]
+    },
+    "seq2": {
+      "cycles": 1,
+      "valve_rows": [
+        [
+          5,
+          [
+            4.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            300.0
+          ]
+        ],
+        [
+          8,
+          [
+            4.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            300.0
+          ]
+        ],
+        [
+          8,
+          [
+            4.0,
+            0.0,
+            0.0,
+            0.0,
+            60.0,
+            0.0,
+            10.0
+          ]
+        ],
+        [
+          7,
+          [
+            0.0,
+            15.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            10.0
+          ]
+        ]
+      ]
+    },
+    "seq3": {
+      "cycles": 1,
+      "valve_rows": [
+        [
+          5,
+          [
+            4.0,
+            0.0,
+            0.0,
+            300.0,
+            60.0,
+            0.0,
+            600.0
+          ]
+        ],
+        [
+          5,
+          [
+            4.0,
+            0.0,
+            0.0,
+            0.0,
+            60.0,
+            0.0,
+            10.0
+          ]
+        ],
+        [
+          8,
+          [
+            4.0,
+            0.0,
+            0.0,
+            300.0,
+            60.0,
+            0.0,
+            600.0
+          ]
+        ],
+        [
+          8,
+          [
+            4.0,
+            0.0,
+            0.0,
+            0.0,
+            60.0,
+            0.0,
+            10.0
+          ]
+        ],
+        [
+          7,
+          [
+            0.0,
+            15.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            10.0
+          ]
+        ]
+      ]
+    },
+    "seq4": {
+      "cycles": 1,
+      "valve_rows": [
+        [
+          5,
+          [
+            4.0,
+            0.0,
+            0.0,
+            300.0,
+            60.0,
+            0.0,
+            300.0
+          ]
+        ],
+        [
+          5,
+          [
+            4.0,
+            0.0,
+            0.0,
+            0.0,
+            60.0,
+            0.0,
+            10.0
+          ]
+        ],
+        [
+          8,
+          [
+            4.0,
+            0.0,
+            0.0,
+            300.0,
+            60.0,
+            0.0,
+            300.0
+          ]
+        ],
+        [
+          8,
+          [
+            4.0,
+            0.0,
+            0.0,
+            0.0,
+            60.0,
+            0.0,
+            10.0
+          ]
+        ],
+        [
+          7,
+          [
+            0.0,
+            15.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            10.0
+          ]
+        ]
+      ]
+    }
+  },
+  "cycle_count": 4,
+  "points_per_cycle": {
+    "1": 271,
+    "2": 7193,
+    "3": 21148,
+    "4": 15147
+  },
+  "baseline": 218.101424,
+  "xlim": 2114.799,
+  "ylim": 2030.516816,
+  "cycle_seq_map": {
+    "1": "seq1",
+    "2": "seq2",
+    "3": "seq3",
+    "4": "seq4"
+  },
+  "phase_bins": {
+    "seq1": [
+      0.0,
+      15.0,
+      25.0
+    ],
+    "seq2": [
+      0.0,
+      4.0,
+      304.0,
+      308.0,
+      608.0,
+      612.0,
+      672.0,
+      682.0,
+      697.0,
+      707.0
+    ],
+    "seq3": [
+      0.0,
+      4.0,
+      304.0,
+      364.0,
+      964.0,
+      968.0,
+      1028.0,
+      1038.0,
+      1042.0,
+      1342.0,
+      1402.0,
+      2002.0,
+      2006.0,
+      2066.0,
+      2076.0,
+      2091.0,
+      2101.0
+    ],
+    "seq4": [
+      0.0,
+      4.0,
+      304.0,
+      364.0,
+      664.0,
+      668.0,
+      728.0,
+      738.0,
+      742.0,
+      1042.0,
+      1102.0,
+      1402.0,
+      1406.0,
+      1466.0,
+      1476.0,
+      1491.0,
+      1501.0
+    ]
+  },
+  "phase_names": {
+    "seq1": [
+      "seq1_7_dosepump",
+      "seq1_7_purge"
+    ],
+    "seq2": [
+      "seq2_5_prepump",
+      "seq2_5_purge",
+      "seq2_8_prepump",
+      "seq2_8_purge",
+      "seq2_8_LR_prepump",
+      "seq2_8_LR_LeakRate",
+      "seq2_8_LR_purge",
+      "seq2_7_dosepump",
+      "seq2_7_purge"
+    ],
+    "seq3": [
+      "seq3_5_prepump",
+      "seq3_5_dose",
+      "seq3_5_hold",
+      "seq3_5_purge",
+      "seq3_5_LR_prepump",
+      "seq3_5_LR_LeakRate",
+      "seq3_5_LR_purge",
+      "seq3_8_prepump",
+      "seq3_8_dose",
+      "seq3_8_hold",
+      "seq3_8_purge",
+      "seq3_8_LR_prepump",
+      "seq3_8_LR_LeakRate",
+      "seq3_8_LR_purge",
+      "seq3_7_dosepump",
+      "seq3_7_purge"
+    ],
+    "seq4": [
+      "seq4_5_prepump",
+      "seq4_5_dose",
+      "seq4_5_hold",
+      "seq4_5_purge",
+      "seq4_5_LR_prepump",
+      "seq4_5_LR_LeakRate",
+      "seq4_5_LR_purge",
+      "seq4_8_prepump",
+      "seq4_8_dose",
+      "seq4_8_hold",
+      "seq4_8_purge",
+      "seq4_8_LR_prepump",
+      "seq4_8_LR_LeakRate",
+      "seq4_8_LR_purge",
+      "seq4_7_dosepump",
+      "seq4_7_purge"
+    ]
+  },
+  "result_counts": {
+    "plots": 4,
+    "cycle_summaries": 4
+  },
+  "output_files": [
+    "260819_22h07m__InSituReactorJay_EDRTrue_DID141_Chamber100_GV60_TDIC35_DAMDPA30_Reactor1_Data_animation.gif",
+    "260819_22h07m__InSituReactorJay_EDRTrue_DID141_Chamber100_GV60_TDIC35_DAMDPA30_Reactor1_Data_exposure.csv",
+    "cycle_0001.png",
+    "cycle_0002.png",
+    "cycle_0003.png",
+    "cycle_0004.png"
+  ],
+  "png_sizes": {
+    "cycle_0001.png": [
+      1359,
+      1027
+    ],
+    "cycle_0002.png": [
+      1367,
+      1027
+    ],
+    "cycle_0003.png": [
+      1367,
+      1027
+    ],
+    "cycle_0004.png": [
+      1367,
+      1027
+    ]
+  },
+  "gif_frames": 4,
+  "exposure_rows": [
+    {
+      "cycle number": "1",
+      "sequence": "2",
+      "5_nominal_dose": "",
+      "5_nominal_hold": "",
+      "5_nominal_duration": "",
+      "5_exposure": "",
+      "5_mean_pressure": "",
+      "5_LR_nominal_dose": "",
+      "5_LR_nominal_hold": "",
+      "5_LR_nominal_duration": "",
+      "5_LR_exposure": "",
+      "5_LR_mean_pressure": "",
+      "5_LR_leak_rate": "",
+      "8_nominal_dose": "",
+      "8_nominal_hold": "",
+      "8_nominal_duration": "",
+      "8_exposure": "",
+      "8_mean_pressure": "",
+      "8_LR_nominal_dose": "0.0",
+      "8_LR_nominal_hold": "60.0",
+      "8_LR_nominal_duration": "60.0",
+      "8_LR_exposure": "5951.7505",
+      "8_LR_mean_pressure": "99.1909",
+      "8_LR_leak_rate": "-497.832815"
+    },
+    {
+      "cycle number": "2",
+      "sequence": "3",
+      "5_nominal_dose": "300.0",
+      "5_nominal_hold": "60.0",
+      "5_nominal_duration": "360.0",
+      "5_exposure": "91586.4002",
+      "5_mean_pressure": "254.4074",
+      "5_LR_nominal_dose": "0.0",
+      "5_LR_nominal_hold": "60.0",
+      "5_LR_nominal_duration": "60.0",
+      "5_LR_exposure": "2561.8067",
+      "5_LR_mean_pressure": "42.6982",
+      "5_LR_leak_rate": "-225.11307",
+      "8_nominal_dose": "300.0",
+      "8_nominal_hold": "60.0",
+      "8_nominal_duration": "360.0",
+      "8_exposure": "158242.2257",
+      "8_mean_pressure": "439.6827",
+      "8_LR_nominal_dose": "0.0",
+      "8_LR_nominal_hold": "60.0",
+      "8_LR_nominal_duration": "60.0",
+      "8_LR_exposure": "7038.437",
+      "8_LR_mean_pressure": "117.3073",
+      "8_LR_leak_rate": "-552.637052"
+    },
+    {
+      "cycle number": "3",
+      "sequence": "4",
+      "5_nominal_dose": "300.0",
+      "5_nominal_hold": "60.0",
+      "5_nominal_duration": "360.0",
+      "5_exposure": "72988.1974",
+      "5_mean_pressure": "202.6893",
+      "5_LR_nominal_dose": "0.0",
+      "5_LR_nominal_hold": "60.0",
+      "5_LR_nominal_duration": "60.0",
+      "5_LR_exposure": "2623.3884",
+      "5_LR_mean_pressure": "43.6518",
+      "5_LR_leak_rate": "-223.231608",
+      "8_nominal_dose": "300.0",
+      "8_nominal_hold": "60.0",
+      "8_nominal_duration": "360.0",
+      "8_exposure": "161448.6698",
+      "8_mean_pressure": "448.3465",
+      "8_LR_nominal_dose": "0.0",
+      "8_LR_nominal_hold": "60.0",
+      "8_LR_nominal_duration": "60.0",
+      "8_LR_exposure": "7189.7983",
+      "8_LR_mean_pressure": "119.83",
+      "8_LR_leak_rate": "-541.598926"
+    }
+  ]
+}
