@@ -149,6 +149,70 @@ def temperature_zones(samples: list[tuple[float, dict]]) -> list[str]:
     )
 
 
+def _tail_temperature_samples(path: Path, max_bytes: int = 256 * 1024) -> list[tuple[float, dict]]:
+    """Read only the newest complete telemetry records from a log."""
+    size = path.stat().st_size
+    with path.open("rb") as handle:
+        handle.seek(max(0, size - max_bytes))
+        if handle.tell():
+            handle.readline()
+        raw_lines = handle.readlines()
+    samples = []
+    for raw_line in raw_lines:
+        try:
+            record = _temperature_record(json.loads(raw_line))
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if record:
+            samples.append(record)
+    samples.sort(key=lambda item: item[0])
+    return samples
+
+
+def detect_temperature_zones_fast(
+    source: str | Path | list[str] | tuple[str, ...],
+) -> tuple[list[str], dict[str, str], float | None, str | None]:
+    """Detect zones from recent configuration metadata and the newest log tail.
+
+    The returned warning is non-None when the configured zone set or names do
+    not agree with the zones observed in the newest telemetry records.
+    """
+    paths = _temperature_source_paths(source)
+    config_samples = load_service_config_data(source)
+    configured_names: dict[str, str] = {}
+    for _, config in reversed(config_samples):
+        names = config.get("zone_names", {})
+        if names:
+            configured_names = dict(names)
+            break
+
+    telemetry_paths = [
+        path for path in paths
+        if not path.name.endswith("_service_config_log.jsonl")
+    ]
+    newest_samples: list[tuple[float, dict]] = []
+    if telemetry_paths:
+        newest_path = max(telemetry_paths, key=lambda path: (path.stat().st_mtime_ns, path.name))
+        newest_samples = _tail_temperature_samples(newest_path)
+
+    observed_zones = temperature_zones(newest_samples)
+    zones = sorted(
+        set(configured_names) | set(observed_zones),
+        key=lambda value: (int(value) if value.isdigit() else float("inf"), value),
+    )
+    warning = None
+    if configured_names and set(configured_names) != set(observed_zones):
+        warning = (
+            "WARNING: configured temperature zones do not match the zones "
+            "reported at the end of the newest telemetry log."
+        )
+    elif configured_names and any(
+        configured_names[zone].strip() == "" for zone in configured_names
+    ):
+        warning = "WARNING: the temperature configuration contains unnamed zones."
+    return zones, configured_names, detect_sample_interval_s(newest_samples), warning
+
+
 def load_service_config_data(
     source: str | Path | list[str] | tuple[str, ...],
 ) -> list[tuple[float, dict]]:

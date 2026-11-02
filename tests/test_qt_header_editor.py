@@ -130,6 +130,36 @@ class HeaderEditorTests(unittest.TestCase):
         self.assertEqual(details["SequenceNotes"], original_details["SequenceNotes"])
         self.assertEqual(details["ValvePrecursor"], original_details["ValvePrecursor"])
 
+    def test_timing_table_is_in_card_and_header_text_checkbox_toggles(self):
+        for header_path in (self.header_path, None):
+            with self.subTest(header_path=header_path):
+                dialog = HeaderEditorDialog(self.original, self.source, header_path)
+                dialog.show()
+                self.app.processEvents()
+                self.assertTrue(dialog.timing_table.isVisible())
+                self.assertGreater(dialog.timing_table.height(), 0)
+                self.assertTrue(dialog.save_text.isChecked())
+                dialog._enable_editing()
+                self.assertTrue(dialog.save_text.isEnabled())
+                dialog.save_text.click()
+                self.assertFalse(dialog.save_text.isChecked())
+                dialog.save_text.click()
+                self.assertTrue(dialog.save_text.isChecked())
+                dialog.close()
+
+    def test_default_layout_splits_timing_half_and_toggles_full_screen(self):
+        dialog = HeaderEditorDialog(self.original, self.source, self.header_path)
+        dialog.resize(1000, 800)
+        dialog.show()
+        dialog._apply_default_split()
+        self.assertAlmostEqual(dialog.splitter.sizes()[1], 400, delta=2)
+        self.assertTrue(dialog.windowFlags() & Qt.WindowType.WindowMaximizeButtonHint)
+        dialog.toggle_full_screen()
+        self.assertTrue(dialog.isFullScreen())
+        dialog.toggle_full_screen()
+        self.assertFalse(dialog.isFullScreen())
+        dialog.close()
+
     def test_invalid_timing_cannot_be_saved(self):
         dialog = HeaderEditorDialog(self.original, self.source, self.header_path)
         model = dialog.timing_model

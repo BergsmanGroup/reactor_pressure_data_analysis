@@ -8,20 +8,23 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
+    QScrollArea,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
-    QScrollArea,
+    QAbstractItemView,
     QSplitter,
     QStyledItemDelegate,
     QTableView,
@@ -31,6 +34,7 @@ from PySide6.QtWidgets import (
 
 from convert_to_json import _is_truthy_detail, build_output_filename, build_payload, load_table, validate_recipe_sheet
 from reactor_ui.models.header_table_model import HeaderTableModel, HeaderTimingModel, display_cell, parse_list, parse_token
+from reactor_ui.widgets.card import Card
 from reactor_ui.widgets.window_geometry import fit_to_available_screen
 
 
@@ -39,6 +43,7 @@ class HeaderEdit:
     payload: dict
     save_header_text: bool
     align_names: bool
+    header_path: Path | None = None
 
 
 class TimingDelegate(QStyledItemDelegate):
@@ -110,6 +115,8 @@ class HeaderEditorDialog(QDialog):
         self.header_path = header_path
         self.result_edit: HeaderEdit | None = None
         self._payload = copy.deepcopy(payload)
+        self._editing = False
+        self._was_maximized = False
 
         layout = QVBoxLayout(self)
         warning = QLabel(
@@ -124,10 +131,9 @@ class HeaderEditorDialog(QDialog):
         layout.addWidget(self.path_label)
 
         splitter = QSplitter(Qt.Orientation.Vertical, self)
-        metadata_scroll = QScrollArea(splitter)
-        metadata_scroll.setWidgetResizable(True)
-        metadata = QWidget(metadata_scroll)
-        metadata_layout = QVBoxLayout(metadata)
+        metadata_card = Card("Header Information and Valve Metadata", splitter)
+        metadata = metadata_card.content
+        metadata_layout = metadata_card.content_layout
         form = QFormLayout()
         self.username = QLineEdit(metadata)
         self.username.setAccessibleName("Header username")
@@ -143,55 +149,90 @@ class HeaderEditorDialog(QDialog):
         self.info.setTabChangesFocus(True)
         self.info.setMaximumHeight(90)
         form.addRow("Info", self.info)
+        metadata_layout.addLayout(form)
+
+        columns = QHBoxLayout()
+        columns.setSpacing(16)
+        left_column = QVBoxLayout()
+        right_column = QVBoxLayout()
+        columns.addLayout(left_column, 1)
+        columns.addLayout(right_column, 1)
+        metadata_layout.addLayout(columns)
+
+        details_form = QFormLayout()
         self.wait = QLineEdit(metadata)
         self.wait.setAccessibleName("Header wait time in seconds")
         self.edr = QCheckBox("EDR", metadata)
-        form.addRow("Wait time (s)", self.wait)
-        form.addRow("", self.edr)
+        wait_row = QWidget(metadata)
+        wait_layout = QHBoxLayout(wait_row)
+        wait_layout.setContentsMargins(0, 0, 0, 0)
+        wait_layout.addWidget(self.wait, 1)
+        wait_layout.addWidget(self.edr)
+        details_form.addRow("Wait time (s)", wait_row)
         self.list_fields: dict[str, QLineEdit] = {}
         for key in ("DID", "SID", "EID", "PID"):
             field = QLineEdit(metadata)
             field.setAccessibleName(f"{key} values")
-            form.addRow(f"{key} (comma-separated)", field)
+            field.setPlaceholderText("comma-separated")
+            details_form.addRow(key, field)
             self.list_fields[key] = field
-        metadata_layout.addLayout(form)
+        left_column.addLayout(details_form)
         self.structured = QCheckBox("Save experimental details as structured JSON", metadata)
         self.format_warning = QLabel(metadata)
         self.format_warning.setWordWrap(True)
-        metadata_layout.addWidget(self.structured)
-        metadata_layout.addWidget(self.format_warning)
-        metadata_layout.addWidget(QLabel("Valve Metadata", metadata))
+        left_column.addWidget(self.structured)
+        left_column.addWidget(self.format_warning)
+        left_column.addStretch(1)
+
+        right_column.addWidget(QLabel("Valve Metadata", metadata))
         self.valve_table = QTableView(metadata)
         self.valve_table.setAccessibleName("Header valve metadata")
         self.valve_table.setMinimumHeight(130)
-        metadata_layout.addWidget(self.valve_table)
+        self.valve_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.valve_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        right_column.addWidget(self.valve_table)
         valve_buttons = QHBoxLayout()
         add_valve = QPushButton("Add Valve Row", metadata)
+        add_valve.setProperty("actionTone", "info")
         remove_valve = QPushButton("Delete Valve Row", metadata)
+        remove_valve.setProperty("actionTone", "danger")
+        self._valve_add_button = add_valve
+        self._valve_remove_button = remove_valve
         add_valve.clicked.connect(self._add_valve)
         remove_valve.clicked.connect(self._remove_valve)
         valve_buttons.addWidget(add_valve)
         valve_buttons.addWidget(remove_valve)
         valve_buttons.addStretch(1)
-        metadata_layout.addLayout(valve_buttons)
-        self.save_text = QCheckBox("Also update or create the selected header text file", metadata)
-        self.align_names = QCheckBox("Rename existing associated files to match the username", metadata)
-        self.save_text.setEnabled(header_path is not None)
-        metadata_scroll.setWidget(metadata)
+        right_column.addLayout(valve_buttons)
+        right_column.addStretch(1)
+        self.save_text = QCheckBox("Also update or create the selected header text file", self)
+        self.align_names = QCheckBox("Rename existing associated files to match the username", self)
+        metadata_scroll = QScrollArea(splitter)
+        metadata_scroll.setWidgetResizable(True)
+        metadata_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        metadata_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        metadata_scroll.setWidget(metadata_card)
+        self.metadata_scroll = metadata_scroll
         splitter.addWidget(metadata_scroll)
 
-        timing = QWidget(splitter)
-        timing_layout = QVBoxLayout(timing)
-        timing_layout.setContentsMargins(0, 0, 0, 0)
-        timing_layout.addWidget(QLabel("Timing Table (seconds)", timing))
+        timing_card = Card("Timing Table (seconds)", splitter, accent="info")
+        timing = timing_card.content
+        timing_layout = timing_card.content_layout
         self.timing_table = QTableView(timing)
         self.timing_table.setAccessibleName("Header timing rows")
         self.timing_table.setItemDelegate(TimingDelegate(self.timing_table))
+        self.timing_table.setMinimumHeight(150)
         timing_layout.addWidget(self.timing_table, 1)
         timing_buttons = QHBoxLayout()
         add_timing = QPushButton("Insert Row", timing)
+        add_timing.setProperty("actionTone", "info")
         delete_timing = QPushButton("Delete Row", timing)
+        delete_timing.setProperty("actionTone", "danger")
         reset_timing = QPushButton("Reset Timing Table", timing)
+        reset_timing.setProperty("actionTone", "warning")
+        self._timing_add_button = add_timing
+        self._timing_delete_button = delete_timing
+        self._timing_reset_button = reset_timing
         add_timing.clicked.connect(self._add_timing)
         delete_timing.clicked.connect(self._delete_timing)
         reset_timing.clicked.connect(self._reset_timing)
@@ -200,10 +241,12 @@ class HeaderEditorDialog(QDialog):
         timing_buttons.addWidget(reset_timing)
         timing_buttons.addStretch(1)
         timing_layout.addLayout(timing_buttons)
-        splitter.addWidget(timing)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
-        splitter.setSizes([470, 300])
+        splitter.addWidget(timing_card)
+        splitter.setChildrenCollapsible(False)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+        self.splitter = splitter
+        self._default_split_applied = False
         layout.addWidget(splitter, 1)
 
         file_options = QHBoxLayout()
@@ -214,10 +257,20 @@ class HeaderEditorDialog(QDialog):
 
         actions = QHBoxLayout()
         regenerate = QPushButton("Regenerate Draft from Recipe...", self)
+        regenerate.setProperty("actionTone", "primary")
+        self.regenerate_button = regenerate
         regenerate.clicked.connect(self._regenerate)
         actions.addWidget(regenerate)
+        self.edit_button = QPushButton("Edit Header", self)
+        self.edit_button.setProperty("actionTone", "info")
+        self.edit_button.clicked.connect(self._enable_editing)
+        actions.addWidget(self.edit_button)
         actions.addStretch(1)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel, self)
+        self.save_button = buttons.button(QDialogButtonBox.StandardButton.Save)
+        self.cancel_button = buttons.button(QDialogButtonBox.StandardButton.Cancel)
+        self.save_button.setProperty("actionTone", "success")
+        self.cancel_button.setProperty("actionTone", "danger")
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
         actions.addWidget(buttons)
@@ -231,7 +284,43 @@ class HeaderEditorDialog(QDialog):
         for field in self.list_fields.values():
             field.textChanged.connect(self._refresh_username)
         self._populate(self._payload)
+        self.auto_username.setChecked(True)
+        self.save_text.setChecked(True)
+        self.align_names.setChecked(True)
+        self._set_editing_enabled(False)
+        self.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, True)
+        self.setWindowFlag(Qt.WindowType.WindowMinimizeButtonHint, True)
+        self.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, True)
+        self.full_screen_button = QPushButton("Full Screen (F11)", self)
+        self.full_screen_button.setProperty("actionTone", "info")
+        self.full_screen_button.setCheckable(True)
+        self.full_screen_button.clicked.connect(self.toggle_full_screen)
+        actions.insertWidget(actions.count() - 1, self.full_screen_button)
+        full_screen_shortcut = QShortcut(QKeySequence(Qt.Key.Key_F11), self)
+        full_screen_shortcut.activated.connect(self.toggle_full_screen)
         fit_to_available_screen(self)
+
+    def toggle_full_screen(self) -> None:
+        if self.isFullScreen():
+            self.showMaximized() if self._was_maximized else self.showNormal()
+        else:
+            self._was_maximized = self.isMaximized()
+            self.showFullScreen()
+        self.full_screen_button.setChecked(self.isFullScreen())
+        self.full_screen_button.setText("Exit Full Screen (F11)" if self.isFullScreen() else "Full Screen (F11)")
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if not self._default_split_applied:
+            self._default_split_applied = True
+            QTimer.singleShot(0, self._apply_default_split)
+
+    def _apply_default_split(self) -> None:
+        total = sum(self.splitter.sizes())
+        if total <= 0:
+            return
+        timing = min(total, round(self.height() * 0.5))
+        self.splitter.setSizes([total - timing, timing])
 
     def _populate(self, payload: dict) -> None:
         self._payload = copy.deepcopy(payload)
@@ -258,6 +347,7 @@ class HeaderEditorDialog(QDialog):
         self.valve_model = HeaderTableModel(("Valve #", "Name", "Temperature (C)"), valve_rows, self)
         self.valve_table.setModel(self.valve_model)
         self.valve_table.horizontalHeader().setStretchLastSection(True)
+        self._fit_valve_table()
         self.valve_model.dataChanged.connect(self._refresh_username)
         self.valve_model.rowsInserted.connect(self._refresh_username)
         self.valve_model.rowsRemoved.connect(self._refresh_username)
@@ -309,6 +399,34 @@ class HeaderEditorDialog(QDialog):
         self.username.setReadOnly(checked)
         self._refresh_username()
 
+    def _enable_editing(self) -> None:
+        self._set_editing_enabled(True)
+
+    def _set_editing_enabled(self, enabled: bool) -> None:
+        self._editing = enabled
+        for field in (self.username, self.wait, *self.list_fields.values()):
+            field.setReadOnly(not enabled or (field is self.username and self.auto_username.isChecked()))
+        self.info.setReadOnly(not enabled)
+        for checkbox in (self.auto_username, self.structured, self.edr, self.save_text, self.align_names):
+            checkbox.setEnabled(enabled)
+        self.valve_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.AllEditTriggers if enabled
+            else QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        self.timing_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.AllEditTriggers if enabled
+            else QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        for button in (self.regenerate_button,):
+            button.setEnabled(enabled)
+        self.edit_button.setVisible(not enabled)
+        self.save_button.setEnabled(enabled)
+        self.cancel_button.setText("Cancel" if enabled else "Close")
+        for button in (self._valve_add_button, self._valve_remove_button,
+                       self._timing_add_button, self._timing_delete_button,
+                       self._timing_reset_button):
+            button.setEnabled(enabled)
+
     def _format_changed(self, *_args) -> None:
         self.format_warning.setText(
             "WARNING: saving as plain text discards structured experimental details other than Info."
@@ -317,12 +435,22 @@ class HeaderEditorDialog(QDialog):
 
     def _add_valve(self) -> None:
         self.valve_model.insert_row(self.valve_model.rowCount())
+        self._fit_valve_table()
         self._refresh_username()
 
     def _remove_valve(self) -> None:
         row = self.valve_table.currentIndex().row()
         self.valve_model.remove_row(row)
+        self._fit_valve_table()
         self._refresh_username()
+
+    def _fit_valve_table(self) -> None:
+        self.valve_table.resizeRowsToContents()
+        self.valve_table.setFixedHeight(
+            self.valve_table.horizontalHeader().height()
+            + self.valve_table.verticalHeader().length()
+            + self.valve_table.frameWidth() * 2
+        )
 
     def _add_timing(self) -> None:
         row = self.timing_table.currentIndex().row()
@@ -381,5 +509,17 @@ class HeaderEditorDialog(QDialog):
             )
         else:
             payload["experimentalDetails"] = details.get("Info", "")
-        self.result_edit = HeaderEdit(payload, self.save_text.isChecked(), self.align_names.isChecked())
+        header_path = self.header_path
+        if self.save_text.isChecked() and header_path is None:
+            default_name = f"{payload['username'] or self.source.stem}_Header.txt"
+            chosen, _ = QFileDialog.getSaveFileName(
+                self, "Header Text File", str(self.source.with_name(default_name)), "Text files (*.txt);;All files (*)"
+            )
+            if not chosen:
+                return
+            header_path = Path(chosen).absolute()
+        self.result_edit = HeaderEdit(
+            payload, self.save_text.isChecked(), self.align_names.isChecked(),
+            header_path if self.save_text.isChecked() else self.header_path,
+        )
         self.accept()

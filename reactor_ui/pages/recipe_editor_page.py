@@ -48,8 +48,8 @@ class RecipeEditorPage(QWidget):
         self._valve_edits: list[list[QLineEdit]] = []
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(32, 26, 32, 24)
-        layout.setSpacing(14)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(10)
 
         self.header = PageHeader("Recipe Editor", "Review a recipe sheet and export a controller payload.", self)
         self.new_button = QPushButton("New", self.header)
@@ -147,12 +147,16 @@ class RecipeEditorPage(QWidget):
         self.description_input.setMinimumHeight(54)
         self.description_input.setMaximumHeight(72)
         self.did_input = QLineEdit(contents)
+        self.did_input.setMaximumWidth(160)
         self.did_input.setAccessibleName("Recipe DID")
         self.edr_input = QLineEdit(contents)
+        self.edr_input.setMaximumWidth(100)
         self.edr_input.setAccessibleName("Recipe EDR")
         self.wait_input = QLineEdit(contents)
+        self.wait_input.setMaximumWidth(128)
         self.wait_input.setAccessibleName("Wait time in seconds")
         self.start_input = QDateTimeEdit(contents)
+        self.start_input.setMaximumWidth(230)
         self.start_input.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
         self.start_input.setCalendarPopup(True)
         self.start_input.setAccessibleName("Planned start time")
@@ -190,18 +194,19 @@ class RecipeEditorPage(QWidget):
         return card
 
     def _build_valve_card(self) -> Card:
-        card = Card("Valve Metadata", self)
+        card = Card("Valve Metadata", self, accent="success")
         self.valve_scroll = QScrollArea(card)
         self.valve_scroll.setWidgetResizable(True)
         self.valve_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         card.add_widget(self.valve_scroll)
         self.add_valve_button = QPushButton("Add valve", card)
+        self.add_valve_button.setProperty("actionTone", "success")
         self.add_valve_button.clicked.connect(self._add_valve)
         card.add_widget(self.add_valve_button)
         return card
 
     def _build_timeline_card(self) -> Card:
-        card = Card("Run Timeline & Sequence Details", self)
+        card = Card("Run Timeline & Sequence Details", self, accent="info")
         self.timeline_scroll = QScrollArea(card)
         self.timeline_scroll.setWidgetResizable(True)
         self.timeline_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
@@ -219,6 +224,7 @@ class RecipeEditorPage(QWidget):
         time_row = QHBoxLayout()
         time_row.addWidget(QLabel("Elapsed time (s)", contents))
         self.time_control = QDoubleSpinBox(contents)
+        self.time_control.setMaximumWidth(160)
         self.time_control.setDecimals(6)
         self.time_control.setRange(0, 0)
         self.time_control.setAccessibleName("Timeline elapsed time in seconds")
@@ -237,7 +243,7 @@ class RecipeEditorPage(QWidget):
         return card
 
     def _build_table_card(self) -> Card:
-        card = Card("Timing Table", self)
+        card = Card("Timing Table", self, accent="warning")
         self.timing_table = RecipeTableView(self.document, card)
         self.timing_table.setObjectName("recipeTimingTable")
         self.timing_table.setAccessibleName("Recipe timing table")
@@ -255,6 +261,7 @@ class RecipeEditorPage(QWidget):
         self.insert_above_button = QPushButton("Insert above", actions)
         self.insert_below_button = QPushButton("Insert below", actions)
         self.delete_rows_button = QPushButton("Delete rows", actions)
+        self.delete_rows_button.setProperty("actionTone", "danger")
         self.undo_button = QPushButton("Undo", actions)
         self.redo_button = QPushButton("Redo", actions)
         self.timing_action_buttons = (
@@ -364,6 +371,7 @@ class RecipeEditorPage(QWidget):
                 editors: list[QLineEdit] = []
                 for column, value in enumerate(values):
                     editor = QLineEdit(value, contents)
+                    editor.setMaximumWidth(280 if column == 1 else 110)
                     editor.setAccessibleName(f"Valve metadata row {row + 1}, {titles[column]}")
                     if row == 0 and column < 2:
                         editor.setReadOnly(True)
@@ -373,11 +381,12 @@ class RecipeEditorPage(QWidget):
                     editors.append(editor)
                 if row:
                     remove = QPushButton("Remove", contents)
+                    remove.setProperty("actionTone", "danger")
                     remove.clicked.connect(lambda _=False, r=row: self._remove_valve(r))
                     grid.addWidget(remove, row + 1, 3)
                 self._valve_edits.append(editors)
             grid.setRowStretch(grid.rowCount(), 1)
-            grid.setColumnStretch(1, 1)
+            grid.setColumnStretch(4, 1)
             self.valve_scroll.setWidget(contents)
         for row, values in enumerate(rows):
             for column, value in enumerate(values):

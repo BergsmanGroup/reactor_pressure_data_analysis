@@ -41,6 +41,7 @@ class PageHeader(QWidget):
         self.row.addWidget(text_container, 1)
 
         self.actions_widget = QWidget(self)
+        self.actions_widget.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         self.actions_layout = QHBoxLayout(self.actions_widget)
         self.actions_layout.setContentsMargins(0, 0, 0, 0)
         self.actions_layout.setSpacing(8)

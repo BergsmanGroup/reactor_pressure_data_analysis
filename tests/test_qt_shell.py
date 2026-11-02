@@ -12,12 +12,13 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEventLoop, QRect, QTimer, Qt, qInstallMessageHandler
-from PySide6.QtGui import QPalette
+from PySide6.QtGui import QColor, QPalette
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QFrame, QMessageBox, QStackedWidget
+from PySide6.QtWidgets import QApplication, QFrame, QLineEdit, QMessageBox, QPushButton, QStackedWidget
 
 from reactor_ui.main_window import MainWindow
 from reactor_ui.theme import COLORS, apply_theme, create_palette
+from reactor_ui.widgets.card import Card
 from reactor_ui.widgets.window_geometry import fit_to_available_screen
 from reactor_ui.workers.pipeline_worker import OperationWorker
 
@@ -172,6 +173,61 @@ class QtShellTests(unittest.TestCase):
             any("Could not parse stylesheet" in message for message in _QT_MESSAGES),
             "\n".join(_QT_MESSAGES),
         )
+
+    def test_card_controls_have_solid_distinct_backgrounds(self):
+        card = Card("Solid controls", accent="info")
+        try:
+            for name, tone, expected in (
+                ("", "", "button"),
+                ("primaryButton", "", "primary"),
+                ("", "success", "success_button"),
+                ("", "warning", "warning_button"),
+            ):
+                button = QPushButton("Action", card)
+                button.setObjectName(name)
+                button.setProperty("actionTone", tone)
+                card.add_widget(button)
+                card.show()
+                self.app.processEvents()
+                image = button.grab().toImage()
+                self.assertEqual(image.pixelColor(5, 5).name(), COLORS[expected].lower())
+                button.setEnabled(False)
+                self.app.processEvents()
+                self.assertNotEqual(button.grab().toImage().pixelColor(5, 5).name(), COLORS[expected].lower())
+            field = QLineEdit("Value", card)
+            card.add_widget(field)
+            self.app.processEvents()
+            self.assertEqual(field.grab().toImage().pixelColor(5, 5).name(), COLORS["surface_raised"].lower())
+        finally:
+            card.close()
+
+    def test_action_colors_meet_normal_text_contrast(self):
+        def luminance(color):
+            channels = (color.redF(), color.greenF(), color.blueF())
+            linear = [value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4 for value in channels]
+            return sum(value * weight for value, weight in zip(linear, (0.2126, 0.7152, 0.0722)))
+
+        foreground = luminance(QColor(COLORS["text"]))
+        for token in ("button", "button_hover", "primary", "primary_hover", "info", "info_hover",
+                      "success_button", "success_hover", "warning_button", "warning_hover",
+                      "danger_button", "danger_hover"):
+            with self.subTest(color=token):
+                self.assertGreaterEqual((foreground + 0.05) / (luminance(QColor(COLORS[token])) + 0.05), 4.5)
+
+    def test_numeric_fields_and_actions_do_not_expand_across_cards(self):
+        self.window.resize(1670, 940)
+        self.app.processEvents()
+        page = self.window.analyze_page
+        self.assertLessEqual(page.options_column.width(), 420)
+        for field in (page.xlim, page.ylim, page.shift, page.wait, page.fps, page.leakrate_reduction,
+                      page.blank_rows, page.grid_x_spacing, page.grid_y_spacing, page.temperature_interval):
+            self.assertLessEqual(field.width(), 128)
+        self.window.show_page("recipe_editor")
+        self.app.processEvents()
+        recipe = self.window.recipe_editor
+        self.assertLess(recipe.add_valve_button.width(), recipe.valve_card.width() // 2)
+        self.assertLessEqual(recipe.wait_input.width(), 128)
+        self.assertLessEqual(recipe.edr_input.width(), 100)
 
     def test_offscreen_screenshot_captures_rail_and_page(self):
         self.window.resize(1440, 900)

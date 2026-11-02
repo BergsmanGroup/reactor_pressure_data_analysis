@@ -180,6 +180,7 @@ def settings_after_processing(state: dict, inputs: AnalysisInputs, reactor: str,
         "temperature_directory": inputs.temperature_directory.strip(),
         "temperature_file": list(inputs.temperature_files),
         "temperature_source_mode": inputs.temperature_source_mode,
+        "temperature_sample_interval_s": inputs.temperature_sample_interval_s.strip(),
         "ise_valve": snapshot.ise_valve,
     }
     saved = updated.get("last_valve_names", {})

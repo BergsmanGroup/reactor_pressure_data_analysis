@@ -29,16 +29,17 @@ class PlotsPage(QWidget):
         self._preview_source: Path | None = None
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(32, 26, 32, 24)
+        layout.setContentsMargins(20, 18, 20, 18)
         layout.setSpacing(12)
         layout.addWidget(PageHeader("Plots & Animation", "Preview a cycle and generate analysis outputs.", self))
 
-        preview = Card("Single-Cycle Preview", self)
+        preview = Card("Single-Cycle Preview", self, accent="info")
         controls = QWidget(preview)
         self.control_layout = QGridLayout(controls)
         self.control_layout.setContentsMargins(0, 0, 0, 0)
         self.cycle_label = QLabel("Cycle", controls)
         self.cycle = QSpinBox(controls)
+        self.cycle.setMaximumWidth(128)
         self.cycle.setRange(0, 2_147_483_647)
         self.cycle.setValue(1)
         self.cycle.setAccessibleName("Preview cycle number")
@@ -68,7 +69,7 @@ class PlotsPage(QWidget):
         preview.add_widget(self.preview_container, 1)
         layout.addWidget(preview, 1)
 
-        output = Card("Generated Outputs", self)
+        output = Card("Generated Outputs", self, accent="success")
         self.output_label = QLabel(output)
         self.output_label.setWordWrap(True)
         self.output_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
@@ -78,6 +79,7 @@ class PlotsPage(QWidget):
         self.output_layout = QGridLayout(output_buttons)
         self.output_layout.setContentsMargins(0, 0, 0, 0)
         self.generate_button = QPushButton("Generate Plots && Animation", output_buttons)
+        self.generate_button.setProperty("actionTone", "success")
         self.generate_button.clicked.connect(self.analyze.generate_outputs)
         self.open_directory_button = QPushButton("Open Output Directory", output_buttons)
         self.open_directory_button.clicked.connect(self._open_directory)

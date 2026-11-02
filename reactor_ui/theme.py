@@ -7,14 +7,26 @@ from PySide6.QtWidgets import QApplication
 
 
 COLORS = {
-    "background": "#11101B",
-    "surface": "#1B1928",
-    "surface_raised": "#232034",
-    "card_border": "#39344F",
-    "text": "#F4F1FA",
-    "muted_text": "#AAA5BA",
-    "primary": "#9474F5",
-    "primary_hover": "#A88EFF",
+    "background": "#111522",
+    "surface": "#1C2334",
+    "surface_raised": "#273249",
+    "card_border": "#4D5C78",
+    "text": "#F4F7FF",
+    "muted_text": "#BCC8DB",
+    "primary": "#7350CE",
+    "primary_hover": "#7954D0",
+    "primary_text": "#C7B5FF",
+    "button": "#3B5078",
+    "button_hover": "#4A6391",
+    "info": "#265F93",
+    "info_hover": "#3175AE",
+    "info_text": "#83D5FF",
+    "success_button": "#196B56",
+    "success_hover": "#20775F",
+    "warning_button": "#795321",
+    "warning_hover": "#91672D",
+    "danger_button": "#873E57",
+    "danger_hover": "#A14B69",
     "focus": "#C2ADFF",
     "selection": "#493B72",
     "error": "#F16D83",
@@ -32,7 +44,7 @@ def create_palette() -> QPalette:
     palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(COLORS["surface_raised"]))
     palette.setColor(QPalette.ColorRole.ToolTipText, QColor(COLORS["text"]))
     palette.setColor(QPalette.ColorRole.Text, QColor(COLORS["text"]))
-    palette.setColor(QPalette.ColorRole.Button, QColor(COLORS["surface_raised"]))
+    palette.setColor(QPalette.ColorRole.Button, QColor(COLORS["button"]))
     palette.setColor(QPalette.ColorRole.ButtonText, QColor(COLORS["text"]))
     palette.setColor(QPalette.ColorRole.BrightText, QColor(COLORS["error"]))
     palette.setColor(QPalette.ColorRole.Link, QColor(COLORS["primary_hover"]))
@@ -46,11 +58,13 @@ def create_stylesheet() -> str:
     return f"""
         QWidget {{
             color: {COLORS["text"]};
-            background-color: {COLORS["background"]};
             font-size: 10pt;
         }}
-        QMainWindow, QStackedWidget {{
+        QMainWindow, QStackedWidget, QDialog {{
             background-color: {COLORS["background"]};
+        }}
+        QScrollArea, QWidget#pageHeader {{
+            background-color: transparent;
         }}
         QFrame#navigationRail {{
             background-color: {COLORS["surface"]};
@@ -59,13 +73,14 @@ def create_stylesheet() -> str:
         QFrame#card {{
             background-color: {COLORS["surface"]};
             border: 1px solid {COLORS["card_border"]};
-            border-radius: 10px;
+            border-left: 3px solid {COLORS["primary_text"]};
+            border-radius: 5px;
         }}
-        QFrame#card QWidget, QFrame#card QLabel {{
+        QWidget#cardContent, QFrame#card QLabel {{
             background-color: transparent;
         }}
         QLabel#brandMark {{
-            color: {COLORS["primary_hover"]};
+            color: {COLORS["primary_text"]};
             font-size: 15pt;
             font-weight: 700;
         }}
@@ -99,7 +114,7 @@ def create_stylesheet() -> str:
         }}
         QToolButton#navButton:checked {{
             color: {COLORS["text"]};
-            background-color: {COLORS["selection"]};
+            background-color: {COLORS["primary"]};
             border-color: {COLORS["primary"]};
             font-weight: 600;
         }}
@@ -107,13 +122,18 @@ def create_stylesheet() -> str:
             border: 2px solid {COLORS["focus"]};
         }}
         QPushButton {{
-            background-color: {COLORS["surface_raised"]};
-            border: 1px solid {COLORS["card_border"]};
-            border-radius: 6px;
-            padding: 7px 12px;
+            background-color: {COLORS["button"]};
+            border: 1px solid {COLORS["button_hover"]};
+            border-radius: 3px;
+            padding: 5px 11px;
+            font-weight: 600;
         }}
         QPushButton:hover {{
-            border-color: {COLORS["primary"]};
+            background-color: {COLORS["button_hover"]};
+            border-color: {COLORS["info_text"]};
+        }}
+        QPushButton:pressed {{
+            background-color: {COLORS["selection"]};
         }}
         QPushButton:disabled, QPushButton#primaryButton:disabled {{
             color: {COLORS["muted_text"]};
@@ -136,8 +156,53 @@ def create_stylesheet() -> str:
         QDoubleSpinBox, QDateTimeEdit, QTableView {{
             background-color: {COLORS["surface_raised"]};
             border: 1px solid {COLORS["card_border"]};
-            border-radius: 5px;
+            border-radius: 3px;
+            padding: 3px 5px;
             selection-background-color: {COLORS["selection"]};
+        }}
+        QLineEdit:read-only {{
+            color: {COLORS["muted_text"]};
+            background-color: {COLORS["surface"]};
+        }}
+        QHeaderView::section {{
+            color: {COLORS["info_text"]};
+            background-color: {COLORS["surface_raised"]};
+            border: 0;
+            border-right: 1px solid {COLORS["card_border"]};
+            border-bottom: 1px solid {COLORS["card_border"]};
+            padding: 5px;
+            font-weight: 600;
+        }}
+        QTableView {{
+            gridline-color: {COLORS["card_border"]};
+            alternate-background-color: {COLORS["surface"]};
+        }}
+        QTableView::item:selected {{
+            color: {COLORS["text"]};
+            background-color: {COLORS["selection"]};
+        }}
+        QProgressBar {{
+            background-color: {COLORS["surface_raised"]};
+            border: 1px solid {COLORS["card_border"]};
+            border-radius: 3px;
+            text-align: center;
+            min-height: 18px;
+        }}
+        QProgressBar::chunk {{
+            background-color: {COLORS["success_button"]};
+        }}
+        QCheckBox {{
+            spacing: 7px;
+        }}
+        QCheckBox::indicator:unchecked {{
+            width: 14px;
+            height: 14px;
+            border: 2px solid {COLORS["muted_text"]};
+            border-radius: 3px;
+            background-color: {COLORS["surface_raised"]};
+        }}
+        QCheckBox::indicator:unchecked:hover {{
+            border-color: {COLORS["focus"]};
         }}
         QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus,
         QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus,
@@ -149,7 +214,7 @@ def create_stylesheet() -> str:
             background: {COLORS["surface"]};
         }}
         QScrollBar::handle:vertical {{
-            background: {COLORS["card_border"]};
+            background: #71819F;
             min-height: 24px;
             border-radius: 4px;
         }}
@@ -158,13 +223,16 @@ def create_stylesheet() -> str:
             background: {COLORS["surface"]};
         }}
         QScrollBar::handle:horizontal {{
-            background: {COLORS["card_border"]};
+            background: #71819F;
             min-width: 24px;
             border-radius: 4px;
         }}
         QScrollBar::add-line, QScrollBar::sub-line {{
             width: 0px;
             height: 0px;
+        }}
+        QScrollBar::add-page, QScrollBar::sub-page {{
+            background: transparent;
         }}
         QSplitter::handle {{
             background-color: {COLORS["background"]};
@@ -181,7 +249,35 @@ def create_stylesheet() -> str:
             border: 1px solid {COLORS["card_border"]};
             padding: 4px;
         }}
-    """
+    """ + "".join(
+        f"""
+        QFrame#card[accent="{tone}"] {{
+            border-left-color: {text};
+        }}
+        QFrame#card[accent="{tone}"] QLabel#cardTitle {{
+            color: {text};
+        }}
+        QPushButton[actionTone="{tone}"] {{
+            background-color: {background};
+            border-color: {hover};
+        }}
+        QPushButton[actionTone="{tone}"]:hover {{
+            background-color: {hover};
+        }}
+        QPushButton[actionTone="{tone}"]:disabled {{
+            color: {COLORS["muted_text"]};
+            background-color: {COLORS["surface_raised"]};
+            border-color: {COLORS["card_border"]};
+        }}
+        """
+        for tone, text, background, hover in (
+            ("primary", COLORS["primary_text"], COLORS["primary"], COLORS["primary_hover"]),
+            ("info", COLORS["info_text"], COLORS["info"], COLORS["info_hover"]),
+            ("success", COLORS["success"], COLORS["success_button"], COLORS["success_hover"]),
+            ("warning", COLORS["warning"], COLORS["warning_button"], COLORS["warning_hover"]),
+            ("danger", COLORS["error"], COLORS["danger_button"], COLORS["danger_hover"]),
+        )
+    )
 
 
 def apply_theme(app: QApplication) -> None:

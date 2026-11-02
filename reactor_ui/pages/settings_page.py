@@ -90,7 +90,7 @@ class SettingsPage(QWidget):
         self._load_error = ""
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(32, 26, 32, 24)
+        layout.setContentsMargins(20, 18, 20, 18)
         layout.setSpacing(12)
         self.header = PageHeader("Settings", "Existing processing defaults, reactor types, and valve names.", self)
         self.save_button = QPushButton("Save Settings", self.header)
@@ -142,12 +142,14 @@ class SettingsPage(QWidget):
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        card = Card("Processing Defaults", scroll)
+        card = Card("Processing Defaults", scroll, accent="info")
         form_widget = QWidget(card)
         form = QFormLayout(form_widget)
         self.text_fields: dict[str, QLineEdit] = {}
         for key, label, _ in _TEXT_SETTINGS:
             field = QLineEdit(form_widget)
+            if key != "temperature_directory":
+                field.setMaximumWidth(128)
             field.setAccessibleName(label)
             field.textChanged.connect(self._mark_dirty)
             self.text_fields[key] = field
@@ -175,7 +177,7 @@ class SettingsPage(QWidget):
         container = QWidget(self)
         layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
-        reactors = Card("Reactor Types", container)
+        reactors = Card("Reactor Types", container, accent="primary")
         reactor_help = QLabel("One configured filename reactor type per line.", reactors)
         reactor_help.setWordWrap(True)
         reactors.add_widget(reactor_help)
@@ -186,7 +188,7 @@ class SettingsPage(QWidget):
         self.reactors.textChanged.connect(self._mark_dirty)
         reactors.add_widget(self.reactors)
         layout.addWidget(reactors)
-        valves = Card("Saved Valve Names", container)
+        valves = Card("Saved Valve Names", container, accent="success")
         self.valve_model = HeaderTableModel(("Reactor type", "Valve #", "Name"), [], self)
         self.valve_model.dataChanged.connect(self._mark_dirty)
         self.valve_model.rowsInserted.connect(self._mark_dirty)
@@ -200,7 +202,9 @@ class SettingsPage(QWidget):
         self.valve_action_layout = QHBoxLayout(actions)
         self.valve_action_layout.setContentsMargins(0, 0, 0, 0)
         add = QPushButton("Add Valve Name", actions)
+        add.setProperty("actionTone", "success")
         remove = QPushButton("Delete Selected", actions)
+        remove.setProperty("actionTone", "danger")
         add.clicked.connect(lambda: self.valve_model.insert_row(self.valve_model.rowCount()))
         remove.clicked.connect(lambda: self.valve_model.remove_row(self.valve_table.currentIndex().row()))
         self.valve_action_layout.addWidget(add)

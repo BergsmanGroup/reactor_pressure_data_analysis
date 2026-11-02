@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QScrollArea,
+    QSizePolicy,
     QStackedWidget,
     QToolButton,
     QVBoxLayout,
@@ -138,6 +139,7 @@ class MainWindow(QMainWindow):
         button.setCheckable(True)
         button.setAutoExclusive(True)
         button.setMinimumHeight(44)
+        button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         button.setAccessibleName(f"{label} page")
         button.setToolTip(label)
         button.setFocusPolicy(Qt.FocusPolicy.StrongFocus)

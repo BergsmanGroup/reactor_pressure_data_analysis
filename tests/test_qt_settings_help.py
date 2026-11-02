@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEventLoop, QTimer
+from PySide6.QtCore import QEventLoop, QTimer, Qt
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QApplication, QMessageBox
 
@@ -201,13 +201,17 @@ class SettingsHelpTests(unittest.TestCase):
         self.assertIn("PySide6:", help_page.version_label.text())
         self.assertIn("Application version: Not specified in this checkout", help_page.version_label.text())
         with patch.object(QDesktopServices, "openUrl", return_value=True) as open_url:
-            for button in help_page.documentation_buttons.values():
-                button.click()
-        self.assertEqual(open_url.call_count, 3)
-        self.assertEqual(Path(open_url.call_args_list[0].args[0].toLocalFile()), self.root / "WHITEPAPER.md")
-        with patch.object(QDesktopServices, "openUrl", return_value=False):
             help_page.documentation_buttons["Technical Whitepaper"].click()
-        self.assertIn("could not open", help_page.status.text())
+            self.assertEqual(open_url.call_count, 0)
+            reader = help_page._documentation_windows[self.root / "WHITEPAPER.md"]
+            self.assertFalse(reader.isModal())
+            self.assertTrue(reader.windowFlags() & Qt.WindowType.WindowMinimizeButtonHint)
+            self.assertTrue(reader.windowFlags() & Qt.WindowType.WindowMaximizeButtonHint)
+            self.assertTrue(reader.windowFlags() & Qt.WindowType.WindowCloseButtonHint)
+            self.assertIn("documentation", reader.reader.toPlainText())
+            help_page.documentation_buttons["Documentation Folder"].click()
+        self.assertEqual(open_url.call_count, 1)
+        self.assertEqual(Path(open_url.call_args.args[0].toLocalFile()), self.root / "docs")
         help_page._open(self.root / "missing.md")
         self.assertIn("does not exist", help_page.status.text())
         help_page.close()

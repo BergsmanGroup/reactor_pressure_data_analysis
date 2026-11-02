@@ -88,6 +88,59 @@ class AnalyzePageTests(unittest.TestCase):
         self.wait_for_worker()
         self.assertEqual(self.state.source_path, self.source.resolve(), self.page.log_box.toPlainText())
 
+    def test_long_path_labels_do_not_push_file_buttons_outside_panel(self):
+        self.page.resize(1670, 940)
+        self.page.header_status.setText("Loaded: " + "LongRunName_" * 40)
+        summary = "Source: C:\\" + "LongDirectoryName\\" * 40 + "run.json"
+        self.page.path_summary.setPlainText(summary)
+        self.app.processEvents()
+        self.assertEqual(self.page.input_column.horizontalScrollBar().maximum(), 0)
+        self.assertLessEqual(self.page.options_column.width(), 420)
+        self.assertEqual(self.page.path_summary.horizontalScrollBar().maximum(), 0)
+        self.assertEqual(self.page.path_summary.toPlainText(), summary)
+        self.assertTrue(self.page.path_summary.isReadOnly())
+
+    def test_processing_is_in_options_column_and_log_is_pinned_full_width(self):
+        self.page.resize(1670, 940)
+        self.page.show()
+        self.app.processEvents()
+        self.assertTrue(self.page.options_column.isAncestorOf(self.page.run_all_button))
+        self.assertTrue(self.page.options_column.isAncestorOf(self.page.add_ise))
+        self.assertTrue(self.page.options_column.isAncestorOf(self.page.run_all_temperature))
+        self.assertFalse(self.page.header.isAncestorOf(self.page.run_all_button))
+        self.assertEqual(self.page.run_all_button.text(), "Run All")
+        self.assertFalse(self.page.input_column.isAncestorOf(self.page.log_box))
+        self.assertFalse(self.page.options_column.isAncestorOf(self.page.log_box))
+        self.assertGreaterEqual(self.page.log_card.width(), self.page.content_splitter.width())
+        self.assertTrue(self.page.log_box.isVisible())
+        self.page.options_column.verticalScrollBar().setValue(self.page.options_column.verticalScrollBar().maximum())
+        self.page.input_column.verticalScrollBar().setValue(self.page.input_column.verticalScrollBar().maximum())
+        self.app.processEvents()
+        top_left = self.page.log_card.mapTo(self.page, self.page.log_card.rect().topLeft())
+        bottom_right = self.page.log_card.mapTo(self.page, self.page.log_card.rect().bottomRight())
+        self.assertTrue(self.page.rect().contains(top_left))
+        self.assertTrue(self.page.rect().contains(bottom_right))
+        self.page.hide()
+
+    def test_attachment_controls_require_matching_input_paths(self):
+        self.load_header()
+        self.assertFalse(self.page.run_all_temperature.isEnabled())
+        self.assertFalse(self.page.add_ise.isEnabled())
+        self.assertFalse(self.page.stage_buttons["attach_temperature"].isEnabled())
+        self.assertFalse(self.page.stage_buttons["attach_ise"].isEnabled())
+        self.page._run_action("condense")
+        self.wait_for_worker()
+
+        self.page.temperature_directory.setText(str(self.root / "temperature"))
+        self.assertTrue(self.page.run_all_temperature.isEnabled())
+        self.assertTrue(self.page.stage_buttons["attach_temperature"].isEnabled())
+        self.assertFalse(self.page.add_ise.isEnabled())
+        self.assertFalse(self.page.stage_buttons["attach_ise"].isEnabled())
+
+        self.page.ise_file.setText(str(self.root / "thickness.csv"))
+        self.assertTrue(self.page.add_ise.isEnabled())
+        self.assertTrue(self.page.stage_buttons["attach_ise"].isEnabled())
+
     def test_run_analysis_from_form_matches_pipeline_and_preserves_raw_source(self):
         before = sha256_file(self.source)
         self.load_header()
@@ -103,10 +156,11 @@ class AnalyzePageTests(unittest.TestCase):
         self.assertTrue(self.local.is_file())
         self.assertTrue(self.log.is_file())
         self.assertEqual(sha256_file(self.source), before)
-        self.assertIn(str(self.state.pipeline.working_path), self.page.path_summary.text())
-        self.assertIn(str(self.output), self.page.path_summary.text())
+        summary = self.page.path_summary.toPlainText()
+        self.assertIn(os.path.relpath(self.state.pipeline.working_path, self.source.parent), summary)
+        self.assertIn(os.path.relpath(self.output, self.source.parent), summary)
 
-    def test_condensed_input_is_explicit_and_cancel_does_not_write(self):
+    def test_condensed_input_is_explicit_and_does_not_prompt_before_writing(self):
         condensed = condensed_path(self.source)
         condense_log(self.source, condensed)
         self.source = condensed
@@ -115,16 +169,17 @@ class AnalyzePageTests(unittest.TestCase):
         self.load_header()
         before = sha256_file(condensed)
         self.assertIn("updated in place", self.page.overwrite_warning.text())
-        self.assertIn(str(condensed), self.page.path_summary.text())
+        self.assertIn(condensed.name, self.page.path_summary.toPlainText())
         with patch.object(QMessageBox, "warning", return_value=QMessageBox.StandardButton.No) as warning:
             self.page._run_action("condense")
-        warning.assert_called_once()
+        warning.assert_not_called()
+        self.wait_for_worker()
         self.assertEqual(sha256_file(condensed), before)
-        self.assertFalse(self.local.exists())
-        self.assertFalse(self.log.exists())
-        self.assertFalse(self.page.is_busy())
+        self.assertEqual(self.state.pipeline.stage, "condensed")
+        self.assertTrue(self.local.exists())
+        self.assertTrue(self.log.exists())
 
-    def test_output_collision_confirmation_can_cancel_without_writes(self):
+    def test_output_collision_does_not_prompt_before_writing(self):
         self.load_header()
         self.output.mkdir()
         existing = self.output / "cycle_0001.png"
@@ -132,9 +187,10 @@ class AnalyzePageTests(unittest.TestCase):
         before = sha256_file(existing)
         with patch.object(QMessageBox, "warning", return_value=QMessageBox.StandardButton.No) as warning:
             self.page._run_action("run_all")
-        self.assertIn(str(existing), warning.call_args.args[2])
-        self.assertEqual(sha256_file(existing), before)
-        self.assertFalse(self.local.exists())
+        warning.assert_not_called()
+        self.wait_for_worker()
+        self.assertNotEqual(sha256_file(existing), before)
+        self.assertTrue(self.local.exists())
 
     def test_output_alias_of_raw_source_is_rejected(self):
         self.load_header()
@@ -156,7 +212,7 @@ class AnalyzePageTests(unittest.TestCase):
         with patch.object(QMessageBox, "warning", return_value=QMessageBox.StandardButton.Yes) as warning:
             self.page._run_action("condense")
         self.wait_for_worker()
-        self.assertIn(str(destination), warning.call_args.args[2])
+        warning.assert_not_called()
         self.assertEqual(sha256_file(self.source), before)
         self.assertFalse(self.source.samefile(destination))
         self.assertEqual(self.state.pipeline.stage, "condensed")
@@ -203,10 +259,10 @@ class AnalyzePageTests(unittest.TestCase):
             encoding="utf-8",
         )
         self.page.write_condensed.setChecked(True)
-        self.page.add_temperature.setChecked(True)
-        self.page.run_all_temperature.setChecked(True)
         self.page.temperature_mode.setCurrentIndex(1)
         self.page.temperature_files.setText(str(telemetry))
+        self.page.add_temperature.setChecked(True)
+        self.page.run_all_temperature.setChecked(True)
         self.page._detect_zones()
         self.wait_for_worker()
         self.page.add_ise.setChecked(True)

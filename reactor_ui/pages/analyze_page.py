@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import copy
 from dataclasses import replace
+import difflib
 import json
+import os
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import QThread, Qt, Slot
+from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor, QTextFormat, QTextOption
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -26,7 +29,9 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSplitter,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -43,12 +48,14 @@ from analysis_metadata import (
 from data_parser import (
     condensed_path,
     detect_sample_interval_s,
+    detect_temperature_zones_fast,
     is_condensed_file,
+    load_service_config_data,
     load_temperature_data,
     read_header,
     temperature_zones,
 )
-from header_text import compare_header_payloads, format_human_json, parse_header_text
+from header_text import associated_header_artifacts, compare_header_payloads, format_human_json, parse_header_text
 from pipeline import ReactorPipeline
 from reactor_ui.adapters.analysis_controller import (
     AnalysisInputs,
@@ -114,17 +121,30 @@ class AnalyzePage(QWidget):
         self._detected_source: str | tuple[str, ...] | None = None
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(32, 26, 32, 24)
-        layout.setSpacing(14)
-        layout.addWidget(PageHeader("Analyze", "Process reactor data and inspect the resulting files.", self))
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(10)
+        self.header = PageHeader("Analyze", "Process reactor data and inspect the resulting files.", self)
+        layout.addWidget(self.header)
         self.content_splitter = QSplitter(Qt.Orientation.Horizontal, self)
         self.content_splitter.setChildrenCollapsible(False)
-        self.content_splitter.addWidget(self._build_left())
-        self.content_splitter.addWidget(self._build_right())
-        self.content_splitter.setStretchFactor(0, 3)
-        self.content_splitter.setStretchFactor(1, 2)
-        self.content_splitter.setSizes([850, 560])
-        layout.addWidget(self.content_splitter, 1)
+        self.input_column = self._build_left()
+        self.content_splitter.addWidget(self.input_column)
+        self.options_column = self._build_right()
+        self.options_column.setMaximumWidth(420)
+        self.content_splitter.addWidget(self.options_column)
+        self.content_splitter.setStretchFactor(0, 1)
+        self.content_splitter.setStretchFactor(1, 0)
+        self.content_splitter.setSizes([950, 380])
+        # The log sits outside the scrolling columns so it is always visible.
+        self.page_splitter = QSplitter(Qt.Orientation.Vertical, self)
+        self.page_splitter.setChildrenCollapsible(False)
+        self.page_splitter.addWidget(self.content_splitter)
+        self.log_card = self._build_log()
+        self.page_splitter.addWidget(self.log_card)
+        self.page_splitter.setStretchFactor(0, 1)
+        self.page_splitter.setStretchFactor(1, 0)
+        self.page_splitter.setSizes([760, 130])
+        layout.addWidget(self.page_splitter, 1)
 
         self._restore_settings()
         self.state.settings_changed.connect(self._settings_changed)
@@ -134,13 +154,19 @@ class AnalyzePage(QWidget):
         self.temperature_directory.textChanged.connect(self._temperature_source_changed)
         self.temperature_files.textChanged.connect(self._temperature_source_changed)
         self.temperature_mode.currentIndexChanged.connect(self._temperature_source_changed)
+        self.ise_file.textChanged.connect(self._refresh_buttons)
         if self._settings_error:
             self._log(f"ERROR loading settings ({self.settings_path}): {self._settings_error}")
         self._refresh_paths()
         self._refresh_buttons()
 
     def set_compact(self, compact: bool) -> None:
+        self.header.set_compact(compact)
+        self.input_column.setMinimumHeight(160 if compact else 0)
+        self.options_column.setMinimumHeight(160 if compact else 0)
+        self.options_column.setMaximumWidth(16777215 if compact else 420)
         self.content_splitter.setOrientation(Qt.Orientation.Vertical if compact else Qt.Orientation.Horizontal)
+        self.content_splitter.setSizes([500, 350] if compact else [950, 380])
 
     @staticmethod
     def _scroll_column(parent: QWidget) -> tuple[QScrollArea, QWidget, QVBoxLayout]:
@@ -168,114 +194,175 @@ class AnalyzePage(QWidget):
 
     def _build_left(self) -> QScrollArea:
         scroll, contents, layout = self._scroll_column(self)
-        files = Card("Input and Header", contents)
+        files = Card("Input and Header", contents, accent="info")
+        file_form_widget = QWidget(files)
+        file_form = QFormLayout(file_form_widget)
+        file_form.setContentsMargins(0, 0, 0, 0)
         file_row, self.source_input = self._path_row(files, "Browse...", self._browse_source)
         self.source_input.setAccessibleName("Reactor data file")
-        files.add_widget(QLabel("Raw or condensed NDJSON", files))
-        files.add_widget(file_row)
+        file_form.addRow("Data file", file_row)
+        header_row, self.header_text_input = self._path_row(files, "Browse...", self._browse_header_text)
+        self.header_text_input.setAccessibleName("Header text file")
+        self.header_text_input.setPlaceholderText("Optional header text file")
+        file_form.addRow("Header text", header_row)
+        files.add_widget(file_form_widget)
         header_buttons = QWidget(files)
         header_layout = QHBoxLayout(header_buttons)
         header_layout.setContentsMargins(0, 0, 0, 0)
         self.load_header_button = QPushButton("Load Header", header_buttons)
+        self.load_header_button.setProperty("actionTone", "info")
         self.load_header_button.clicked.connect(self._load_header)
         self.header_status = QLabel("No header loaded.", header_buttons)
         self.header_status.setWordWrap(True)
+        self.header_status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         header_layout.addWidget(self.load_header_button)
+        self.compare_button = QPushButton("Compare Headers", header_buttons)
+        self.compare_button.clicked.connect(self._compare_headers)
+        header_layout.addWidget(self.compare_button)
         header_layout.addWidget(self.header_status, 1)
         files.add_widget(header_buttons)
-        header_row, self.header_text_input = self._path_row(files, "Browse...", self._browse_header_text)
-        self.header_text_input.setAccessibleName("Header text file")
-        files.add_widget(QLabel("Header text file (optional)", files))
-        files.add_widget(header_row)
-        self.compare_button = QPushButton("Compare Headers", files)
-        self.compare_button.clicked.connect(self._compare_headers)
-        files.add_widget(self.compare_button)
         header_actions = QWidget(files)
         header_action_layout = QHBoxLayout(header_actions)
         header_action_layout.setContentsMargins(0, 0, 0, 0)
-        self.edit_header_button = QPushButton("Edit Data Header...", header_actions)
+        self.edit_header_button = QPushButton("View/Edit Header...", header_actions)
+        self.edit_header_button.setProperty("actionTone", "warning")
         self.edit_header_button.clicked.connect(self._edit_header)
         self.use_header_text_button = QPushButton("Use Header Text as Data Header...", header_actions)
+        self.use_header_text_button.setProperty("actionTone", "warning")
         self.use_header_text_button.clicked.connect(self._use_header_text)
         header_action_layout.addWidget(self.edit_header_button)
         header_action_layout.addWidget(self.use_header_text_button)
+        header_action_layout.addStretch(1)
         files.add_widget(header_actions)
         header_warning = QLabel("Header changes require a file-by-file confirmation and backups.", files)
         header_warning.setWordWrap(True)
-        header_warning.setObjectName("mutedText")
+        header_warning.setStyleSheet(f"color: {COLORS['warning']};")
         files.add_widget(header_warning)
         layout.addWidget(files)
 
-        temperature = Card("Temperature Data", contents)
+        temperature = Card("Temperature Data", contents, accent="success")
         self.add_temperature = QCheckBox("Add temperature data to condensed output", temperature)
         temperature.add_widget(self.add_temperature)
         self.temperature_mode = QComboBox(temperature)
         self.temperature_mode.addItems(["Log directory", "Specific log files"])
-        temperature.add_widget(self.temperature_mode)
+        temperature_tools = QWidget(temperature)
+        temperature_tools_layout = QHBoxLayout(temperature_tools)
+        temperature_tools_layout.setContentsMargins(0, 0, 0, 0)
+        temperature_tools_layout.addWidget(QLabel("Source type:", temperature_tools))
+        temperature_tools_layout.addWidget(self.temperature_mode)
+        temperature_tools_layout.addStretch(1)
+        temperature.add_widget(temperature_tools)
+        temperature_paths = QWidget(temperature)
+        temperature_form = QFormLayout(temperature_paths)
+        temperature_form.setContentsMargins(0, 0, 0, 0)
         directory_row, self.temperature_directory = self._path_row(temperature, "Browse...", self._browse_temperature_directory)
+        self.temperature_directory_row = directory_row
         self.temperature_directory.setAccessibleName("Temperature log directory")
-        temperature.add_widget(directory_row)
+        temperature_form.addRow("Directory", directory_row)
         files_row, self.temperature_files = self._path_row(temperature, "Choose files...", self._browse_temperature_files)
+        self.temperature_files_row = files_row
         self.temperature_files.setAccessibleName("Temperature log files separated by semicolons")
-        temperature.add_widget(files_row)
-        self.detect_zones_button = QPushButton("Detect Temperature Zones", temperature)
+        temperature_form.addRow("Log files", files_row)
+        temperature.add_widget(temperature_paths)
+        temperature_status = QWidget(temperature)
+        temperature_status_layout = QHBoxLayout(temperature_status)
+        temperature_status_layout.setContentsMargins(0, 0, 0, 0)
+        self.detect_zones_button = QPushButton("Detect Temperature Zones", temperature_status)
+        self.detect_zones_button.setProperty("actionTone", "success")
         self.detect_zones_button.clicked.connect(self._detect_zones)
-        temperature.add_widget(self.detect_zones_button)
+        temperature_status_layout.addWidget(self.detect_zones_button)
+        thorough_button = QPushButton("Thorough Zone Scan", temperature_status)
+        thorough_button.setProperty("actionTone", "info")
+        thorough_button.clicked.connect(self._detect_zones_thorough)
+        self.thorough_zones_button = thorough_button
+        temperature_status_layout.addWidget(thorough_button)
+        self.interval_label = QLabel("Zones not detected.", temperature_status)
+        self.interval_label.setObjectName("mutedText")
+        temperature_status_layout.addWidget(self.interval_label, 1)
+        temperature.add_widget(temperature_status)
+        self.temperature_warning = QLabel(temperature)
+        self.temperature_warning.setWordWrap(True)
+        self.temperature_warning.setStyleSheet(f"color: {COLORS['warning']};")
+        self.temperature_warning.hide()
+        temperature.add_widget(self.temperature_warning)
         self.temperature_zone_widget = QWidget(temperature)
         self.temperature_zone_layout = QGridLayout(self.temperature_zone_widget)
         self.temperature_zone_layout.setContentsMargins(0, 0, 0, 0)
+        self.temperature_zone_layout.setColumnStretch(3, 1)
         temperature.add_widget(self.temperature_zone_widget)
-        self.interval_label = QLabel("Zones not detected.", temperature)
-        self.interval_label.setObjectName("mutedText")
-        temperature.add_widget(self.interval_label)
         interval_row = QWidget(temperature)
         interval_layout = QFormLayout(interval_row)
         interval_layout.setContentsMargins(0, 0, 0, 0)
         self.temperature_interval = QLineEdit(interval_row)
+        self.temperature_interval.setText("15")
+        self.temperature_interval.setMaximumWidth(128)
         self.temperature_interval.setAccessibleName("Temperature sample interval in seconds")
         interval_layout.addRow("Sample interval (s; blank = all)", self.temperature_interval)
         temperature.add_widget(interval_row)
         layout.addWidget(temperature)
 
         ise = Card("iSE Thickness Data", contents)
-        self.add_ise = QCheckBox("Attach iSE data during Run Analysis", ise)
-        ise.add_widget(self.add_ise)
         ise_row, self.ise_file = self._path_row(ise, "Browse...", self._browse_ise)
         self.ise_file.setAccessibleName("iSE thickness CSV")
         ise.add_widget(ise_row)
         ise_form_widget = QWidget(ise)
-        ise_form = QFormLayout(ise_form_widget)
+        ise_form = QGridLayout(ise_form_widget)
         ise_form.setContentsMargins(0, 0, 0, 0)
         self.ise_valve = QLineEdit("Valve7", ise_form_widget)
+        self.ise_valve.setMaximumWidth(128)
         self.ise_valve.setAccessibleName("iSE valve")
         self.ise_first_cycle = QLineEdit("1.0", ise_form_widget)
+        self.ise_first_cycle.setMaximumWidth(100)
         self.ise_first_cycle.setAccessibleName("iSE first cycle or half-cycle")
-        ise_form.addRow("Valve", self.ise_valve)
-        ise_form.addRow("First cycle / half-cycle", self.ise_first_cycle)
+        ise_form.addWidget(QLabel("Valve", ise_form_widget), 0, 0)
+        ise_form.addWidget(self.ise_valve, 0, 1)
+        ise_form.addWidget(QLabel("First cycle / half-cycle", ise_form_widget), 0, 2)
+        ise_form.addWidget(self.ise_first_cycle, 0, 3)
+        ise_form.setColumnStretch(4, 1)
         ise.add_widget(ise_form_widget)
         layout.addWidget(ise)
 
-        output = Card("Output and File Ownership", contents)
+        output = Card("Output and File Ownership", contents, accent="warning")
         output_row, self.output_input = self._path_row(output, "Browse...", self._browse_output)
         self.output_input.setAccessibleName("Output directory")
         output.add_widget(output_row)
-        self.path_summary = QLabel(output)
-        self.path_summary.setWordWrap(True)
-        self.path_summary.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.path_summary = QPlainTextEdit(output)
+        self.path_summary.setReadOnly(True)
+        self.path_summary.setTabChangesFocus(True)
+        self.path_summary.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        self.path_summary.setMinimumHeight(96)
+        self.path_summary.setMaximumHeight(128)
+        self.path_summary.setAccessibleName("Source, working, and output paths")
         output.add_widget(self.path_summary)
         self.overwrite_warning = QLabel(output)
         self.overwrite_warning.setWordWrap(True)
+        self.overwrite_warning.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.overwrite_warning.setStyleSheet(f"color: {COLORS['warning']};")
         output.add_widget(self.overwrite_warning)
         layout.addWidget(output)
+        layout.addStretch(1)
+        return scroll
 
-        processing = Card("Processing", contents)
-        self.run_all_button = QPushButton("Run Analysis", processing)
+    def _build_processing(self, parent: QWidget) -> Card:
+        processing = Card("Processing", parent, accent="success")
+        run_all_row = QWidget(processing)
+        run_all_layout = QHBoxLayout(run_all_row)
+        run_all_layout.setContentsMargins(0, 0, 0, 0)
+        self.run_all_button = QPushButton("Run All", run_all_row)
         self.run_all_button.setObjectName("primaryButton")
         self.run_all_button.clicked.connect(lambda: self._run_action("run_all"))
-        processing.add_widget(self.run_all_button)
-        self.run_all_temperature = QCheckBox("Attach temperature during Run Analysis", processing)
-        processing.add_widget(self.run_all_temperature)
+        run_all_layout.addWidget(self.run_all_button)
+        run_all_checks = QWidget(run_all_row)
+        run_all_checks_layout = QVBoxLayout(run_all_checks)
+        run_all_checks_layout.setContentsMargins(0, 0, 0, 0)
+        run_all_checks_layout.setSpacing(2)
+        self.run_all_temperature = QCheckBox("Attach temperature data", run_all_checks)
+        self.add_ise = QCheckBox("Attach iSE data", run_all_checks)
+        run_all_checks_layout.addWidget(self.run_all_temperature)
+        run_all_checks_layout.addWidget(self.add_ise)
+        run_all_layout.addWidget(run_all_checks)
+        run_all_layout.addStretch(1)
+        processing.add_widget(run_all_row)
         self.progress = QProgressBar(processing)
         self.progress.setRange(0, 100)
         processing.add_widget(self.progress)
@@ -284,6 +371,7 @@ class AnalyzePage(QWidget):
         buttons_widget = QWidget(processing)
         buttons = QGridLayout(buttons_widget)
         buttons.setContentsMargins(0, 0, 0, 0)
+        buttons.setColumnStretch(2, 1)
         self.stage_buttons: dict[str, QPushButton] = {}
         for index, (action, title) in enumerate(
             (
@@ -295,32 +383,46 @@ class AnalyzePage(QWidget):
             )
         ):
             button = QPushButton(title, buttons_widget)
+            button.setProperty(
+                "actionTone",
+                {"condense": "info", "label_phases": "info", "attach_temperature": "success",
+                 "attach_ise": "primary", "generate_outputs": "success"}[action],
+            )
             button.clicked.connect(lambda _=False, name=action: self._run_action(name))
             buttons.addWidget(button, index // 2, index % 2)
             self.stage_buttons[action] = button
         processing.add_widget(buttons_widget)
-        layout.addWidget(processing)
+        return processing
 
-        log_card = Card("Log", contents)
-        self.log_box = QPlainTextEdit(log_card)
+    def _build_log(self) -> Card:
+        log_card = Card("Log", self, accent="info")
+        log_row = QWidget(log_card)
+        log_layout = QHBoxLayout(log_row)
+        log_layout.setContentsMargins(0, 0, 0, 0)
+        self.log_box = QPlainTextEdit(log_row)
         self.log_box.setReadOnly(True)
         self.log_box.setTabChangesFocus(True)
         self.log_box.setMaximumBlockCount(1000)
-        self.log_box.setMinimumHeight(140)
-        log_card.add_widget(self.log_box)
-        clear = QPushButton("Clear Log", log_card)
+        self.log_box.setMinimumHeight(64)
+        self.log_box.setFont(QFont("JetBrains Mono", 10))
+        self.log_box.setStyleSheet(
+            "QPlainTextEdit { background-color: #000000; color: #F4F7FF; }"
+        )
+        self.log_box.setAccessibleName("Processing log")
+        log_layout.addWidget(self.log_box, 1)
+        clear = QPushButton("Clear Log", log_row)
         clear.clicked.connect(self.log_box.clear)
-        log_card.add_widget(clear)
-        layout.addWidget(log_card)
-        layout.addStretch(1)
-        return scroll
+        log_layout.addWidget(clear, 0, Qt.AlignmentFlag.AlignTop)
+        log_card.add_widget(log_row)
+        return log_card
 
     def _build_right(self) -> QScrollArea:
         scroll, contents, layout = self._scroll_column(self)
-        options = Card("Analysis and Plot Options", contents)
+        options = Card("Analysis and Plot Options", contents, accent="info")
         form_widget = QWidget(options)
         form = QFormLayout(form_widget)
         form.setContentsMargins(0, 0, 0, 0)
+        form.setHorizontalSpacing(12)
         self.xlim = QLineEdit("auto", form_widget)
         self.ylim = QLineEdit("auto", form_widget)
         self.shift = QLineEdit("0", form_widget)
@@ -342,22 +444,30 @@ class AnalyzePage(QWidget):
             ("Y grid spacing", self.grid_y_spacing),
         ):
             field.setAccessibleName(label)
+            field.setMaximumWidth(128)
             form.addRow(label, field)
         self.grid_x = QCheckBox("X gridlines", form_widget)
         self.grid_y = QCheckBox("Y gridlines", form_widget)
         self.write_condensed = QCheckBox("Write condensed data JSON", form_widget)
-        form.addRow(self.grid_x)
-        form.addRow(self.grid_y)
+        grids = QWidget(form_widget)
+        grid_layout = QHBoxLayout(grids)
+        grid_layout.setContentsMargins(0, 0, 0, 0)
+        grid_layout.addWidget(self.grid_x)
+        grid_layout.addWidget(self.grid_y)
+        grid_layout.addStretch(1)
+        form.addRow(grids)
         form.addRow(self.write_condensed)
         options.add_widget(form_widget)
         options.add_widget(QLabel("Summary box temperature zones", options))
         self.plot_zone_widget = QWidget(options)
         self.plot_zone_layout = QGridLayout(self.plot_zone_widget)
         self.plot_zone_layout.setContentsMargins(0, 0, 0, 0)
+        self.plot_zone_layout.setColumnStretch(3, 1)
         options.add_widget(self.plot_zone_widget)
         layout.addWidget(options)
+        layout.addWidget(self._build_processing(contents))
 
-        valves = Card("Valve Metadata", contents)
+        valves = Card("Valve Metadata", contents, accent="success")
         self.valve_widget = QWidget(valves)
         self.valve_layout = QFormLayout(self.valve_widget)
         self.valve_layout.setContentsMargins(0, 0, 0, 0)
@@ -389,6 +499,7 @@ class AnalyzePage(QWidget):
             field.setText(str(last.get(key, default)))
         files = last.get("temperature_file", "")
         self.temperature_files.setText("; ".join(str(item) for item in files) if isinstance(files, list) else str(files))
+        self.temperature_interval.setText(str(last.get("temperature_sample_interval_s", "15")))
         self.temperature_mode.setCurrentIndex(1 if last.get("temperature_source_mode") == "file" else 0)
         self.grid_x.setChecked(bool(last.get("grid_x", True)))
         self.grid_y.setChecked(bool(last.get("grid_y", True)))
@@ -457,22 +568,43 @@ class AnalyzePage(QWidget):
         source_text = self.source_input.text().strip()
         source = Path(source_text).resolve() if source_text else None
         output_text = self.output_input.text().strip()
-        output = str(Path(output_text).resolve()) if output_text else "(not selected)"
+        output_path = Path(output_text).resolve() if output_text else None
         pipeline = self.state.pipeline
         if pipeline is not None and pipeline.working_path is not None:
-            working = str(pipeline.working_path.resolve())
+            working_path = pipeline.working_path.resolve()
         elif source is None:
-            working = "(not selected)"
+            working_path = None
         elif not self.write_condensed.isChecked():
-            working = "(temporary file assigned when condensation starts)"
+            working_path = None
         elif self.state.source_path == source and self.state.input_is_condensed:
-            working = str(source)
+            working_path = source
         else:
-            working = str(condensed_path(source))
-        self.path_summary.setText(f"Source: {source or '(not selected)'}\nWorking: {working}\nOutput directory: {output}")
+            working_path = condensed_path(source)
+
+        base = source.parent if source is not None else None
+
+        def display_path(path: Path | None, missing: str) -> str:
+            if path is None:
+                return missing
+            if base is None:
+                return str(path)
+            try:
+                return str(path.relative_to(base))
+            except ValueError:
+                return os.path.relpath(path, base)
+
+        source_display = display_path(source, "(not selected)")
+        working_display = display_path(
+            working_path,
+            "(not selected)" if source is None else "(temporary file assigned when condensation starts)",
+        )
+        output_display = display_path(output_path, "(not selected)")
+        self.path_summary.setPlainText(
+            f"Source: {source_display}\nWorking: {working_display}\nOutput directory: {output_display}"
+        )
         if self.state.source_path == source and self.state.input_is_condensed and self.write_condensed.isChecked():
             self.overwrite_warning.setText("WARNING: the selected condensed input will be updated in place.")
-        elif self.write_condensed.isChecked() and source is not None and Path(working).is_file():
+        elif self.write_condensed.isChecked() and working_path is not None and working_path.is_file():
             self.overwrite_warning.setText("WARNING: an existing condensed working file may be overwritten.")
         else:
             self.overwrite_warning.setText(
@@ -485,14 +617,29 @@ class AnalyzePage(QWidget):
         usable = loaded and bool(self.state.sequences)
         pipeline = self.state.pipeline
         downstream = usable and pipeline is not None and pipeline.stage != "none"
+        has_temperature_source = self._temperature_source() is not None
+        has_ise_source = bool(self.ise_file.text().strip())
+        if not has_temperature_source:
+            self.add_temperature.setChecked(False)
+            self.run_all_temperature.setChecked(False)
+        if not has_ise_source:
+            self.add_ise.setChecked(False)
         self.load_header_button.setEnabled(not busy)
         self.compare_button.setEnabled(not busy and loaded)
         self.edit_header_button.setEnabled(not busy and loaded)
         self.use_header_text_button.setEnabled(not busy and loaded)
-        self.detect_zones_button.setEnabled(not busy)
+        self.detect_zones_button.setEnabled(not busy and has_temperature_source)
+        self.thorough_zones_button.setEnabled(not busy and has_temperature_source)
         self.run_all_button.setEnabled(not busy and usable)
+        self.run_all_temperature.setEnabled(not busy and has_temperature_source)
+        self.add_ise.setEnabled(not busy and has_ise_source)
         for action, button in self.stage_buttons.items():
-            button.setEnabled(not busy and (usable if action == "condense" else downstream))
+            enabled = not busy and (usable if action == "condense" else downstream)
+            if action == "attach_temperature":
+                enabled = enabled and has_temperature_source
+            elif action == "attach_ise":
+                enabled = enabled and has_ise_source
+            button.setEnabled(enabled)
         self.source_input.setEnabled(not busy)
         self.output_input.setEnabled(not busy)
 
@@ -579,6 +726,7 @@ class AnalyzePage(QWidget):
             else:
                 self.wait.setReadOnly(False)
             self.header_status.setText(f"Loaded: {header.get('username', '')} ({len(sequences)} sequences)")
+            self.header_status.setToolTip(self.header_status.text())
             self._log(f"Header loaded; {'condensed' if condensed else 'raw'} input.")
             self.state.changed.emit()
             self._refresh_paths()
@@ -622,10 +770,15 @@ class AnalyzePage(QWidget):
 
     def _temperature_source_changed(self, *_args) -> None:
         file_mode = self.temperature_mode.currentIndex() == 1
+        self.temperature_directory_row.setVisible(not file_mode)
+        self.temperature_files_row.setVisible(file_mode)
         self.temperature_directory.setEnabled(not file_mode)
         self.temperature_files.setEnabled(file_mode)
         self._detected_source = None
         self._set_zones([], None)
+        self.temperature_warning.clear()
+        self.temperature_warning.hide()
+        self._refresh_buttons()
 
     @staticmethod
     def _clear_layout(layout: QGridLayout) -> None:
@@ -634,14 +787,23 @@ class AnalyzePage(QWidget):
             if item.widget() is not None:
                 item.widget().deleteLater()
 
-    def _set_zones(self, zones: list[str], interval: float | None) -> None:
+    def _set_zones(
+        self,
+        zones: list[str],
+        interval: float | None,
+        zone_names: dict[str, str] | None = None,
+    ) -> None:
         self._clear_layout(self.temperature_zone_layout)
         self._clear_layout(self.plot_zone_layout)
         self._temperature_checks.clear()
         self._plot_checks.clear()
+        zone_names = zone_names or {}
         for index, zone in enumerate(zones):
-            attach = QCheckBox(f"Zone {zone}", self.temperature_zone_widget)
-            plot = QCheckBox(f"Zone {zone}", self.plot_zone_widget)
+            label = f"Zone {zone}"
+            if zone_names.get(zone):
+                label += f": {zone_names[zone]}"
+            attach = QCheckBox(label, self.temperature_zone_widget)
+            plot = QCheckBox(label, self.plot_zone_widget)
             attach.setChecked(True)
             plot.setChecked(True)
             self.temperature_zone_layout.addWidget(attach, index // 3, index % 3)
@@ -660,20 +822,63 @@ class AnalyzePage(QWidget):
             return
 
         def operation(_progress, log):
-            samples = load_temperature_data(list(source) if isinstance(source, tuple) else source)
-            log(f"Read {len(samples)} temperature samples.")
-            return temperature_zones(samples), detect_sample_interval_s(samples)
+            result = detect_temperature_zones_fast(list(source) if isinstance(source, tuple) else source)
+            zones, _names, _interval, warning = result
+            log(f"Detected {len(zones)} temperature zones from recent configuration and telemetry data.")
+            if warning:
+                log(warning)
+            return result
 
         def detected(result: object) -> None:
-            zones, interval = result
+            zones, names, interval, warning = result
             if source != self._temperature_source():
                 self._log("Temperature source changed; discarded the earlier zone scan.")
                 return
             self._detected_source = source
-            self._set_zones(zones, interval)
+            self._set_zones(zones, interval, names)
+            self._set_temperature_warning(warning)
             self._log("Detected temperature zones: " + (", ".join(zones) if zones else "none"))
 
         self._start_worker(OperationWorker("Detect temperature zones", operation), detected)
+
+    def _detect_zones_thorough(self) -> None:
+        source = self._temperature_source()
+        if source is None:
+            self._log("ERROR: select a temperature directory or log files first.")
+            return
+
+        def operation(_progress, log):
+            samples = load_temperature_data(list(source) if isinstance(source, tuple) else source)
+            config_samples = load_service_config_data(list(source) if isinstance(source, tuple) else source)
+            names = next(
+                (dict(config.get("zone_names", {})) for _, config in reversed(config_samples)
+                 if config.get("zone_names")),
+                {},
+            )
+            zones = temperature_zones(samples)
+            warning = (
+                "WARNING: configured temperature zones do not match the zones "
+                "found during the thorough telemetry scan."
+                if names and set(names) != set(zones) else None
+            )
+            log(f"Read {len(samples)} temperature samples in the thorough zone scan.")
+            return zones, names, detect_sample_interval_s(samples), warning
+
+        def detected(result: object) -> None:
+            zones, names, interval, warning = result
+            if source != self._temperature_source():
+                self._log("Temperature source changed; discarded the earlier zone scan.")
+                return
+            self._detected_source = source
+            self._set_zones(zones, interval, names)
+            self._set_temperature_warning(warning)
+            self._log("Thoroughly detected temperature zones: " + (", ".join(zones) if zones else "none"))
+
+        self._start_worker(OperationWorker("Thorough temperature zone scan", operation), detected)
+
+    def _set_temperature_warning(self, warning: str | None) -> None:
+        self.temperature_warning.setText(warning or "")
+        self.temperature_warning.setVisible(bool(warning))
 
     def _compare_headers(self) -> None:
         source = self.state.source_path
@@ -692,17 +897,25 @@ class AnalyzePage(QWidget):
             status = "valveSequence differs" if differences else "valveSequence matches"
             self._log(f"Header comparison: {status}. No files were written.")
             dialog = QDialog(self)
-            dialog.setWindowTitle(status)
+            dialog.setWindowTitle("Compare Headers")
             dialog.resize(1100, 700)
             layout = QVBoxLayout(dialog)
-            layout.addWidget(QLabel(status, dialog))
             panes = QSplitter(Qt.Orientation.Horizontal, dialog)
-            for value in (raw, text):
+            views = []
+            rendered = [format_human_json(raw), format_human_json(text)]
+            for value in rendered:
                 view = QPlainTextEdit(panes)
                 view.setReadOnly(True)
                 view.setTabChangesFocus(True)
-                view.setPlainText(format_human_json(value))
+                view.setFont(QFont("JetBrains Mono", 10))
+                view.setStyleSheet(
+                    "QPlainTextEdit { background-color: #000000; color: #F4F7FF; }"
+                )
+                view.setPlainText(value)
                 panes.addWidget(view)
+                views.append(view)
+            self._highlight_diff(views[0], views[1], rendered[0], rendered[1])
+            self._synchronize_diff_views(views[0], views[1])
             layout.addWidget(panes)
             close = QPushButton("Close", dialog)
             close.clicked.connect(dialog.accept)
@@ -711,6 +924,73 @@ class AnalyzePage(QWidget):
 
         self._start_worker(OperationWorker("Compare headers", operation), compared)
 
+    @staticmethod
+    def _highlight_diff(
+        left: QPlainTextEdit,
+        right: QPlainTextEdit,
+        left_text: str,
+        right_text: str,
+    ) -> None:
+        colors = (QColor("#7A263A"), QColor("#1D6B4F"))
+        selections: tuple[list[QTextEdit.ExtraSelection], list[QTextEdit.ExtraSelection]] = ([], [])
+        lines = (left_text.splitlines(), right_text.splitlines())
+        matcher = difflib.SequenceMatcher(a=lines[0], b=lines[1], autojunk=False)
+        for tag, left_start, left_end, right_start, right_end in matcher.get_opcodes():
+            if tag == "equal":
+                continue
+            if tag in {"replace", "delete"}:
+                AnalyzePage._add_line_selections(selections[0], left.document(), left_start, left_end, colors[0])
+            if tag in {"replace", "insert"}:
+                AnalyzePage._add_line_selections(selections[1], right.document(), right_start, right_end, colors[1])
+        left.setExtraSelections(selections[0])
+        right.setExtraSelections(selections[1])
+
+    @staticmethod
+    def _add_line_selections(
+        selections: list[QTextEdit.ExtraSelection],
+        document,
+        start: int,
+        end: int,
+        color: QColor,
+    ) -> None:
+        for line_number in range(start, end):
+            cursor = QTextCursor(document)
+            cursor.movePosition(QTextCursor.MoveOperation.Start)
+            cursor.movePosition(QTextCursor.MoveOperation.Down, QTextCursor.MoveMode.MoveAnchor, line_number)
+            cursor.movePosition(QTextCursor.MoveOperation.EndOfLine, QTextCursor.MoveMode.KeepAnchor)
+            selection = QTextEdit.ExtraSelection()
+            selection.cursor = cursor
+            selection.format = QTextCharFormat()
+            selection.format.setBackground(color)
+            selection.format.setForeground(QColor("#FFFFFF"))
+            selection.format.setProperty(QTextFormat.Property.FullWidthSelection, True)
+            selections.append(selection)
+
+    @staticmethod
+    def _synchronize_diff_views(left: QPlainTextEdit, right: QPlainTextEdit) -> None:
+        syncing = False
+
+        def sync(target, value: int) -> None:
+            nonlocal syncing
+            if syncing:
+                return
+            syncing = True
+            target.setValue(value)
+            syncing = False
+
+        left.verticalScrollBar().valueChanged.connect(
+            lambda value: sync(right.verticalScrollBar(), value)
+        )
+        right.verticalScrollBar().valueChanged.connect(
+            lambda value: sync(left.verticalScrollBar(), value)
+        )
+        left.horizontalScrollBar().valueChanged.connect(
+            lambda value: sync(right.horizontalScrollBar(), value)
+        )
+        right.horizontalScrollBar().valueChanged.connect(
+            lambda value: sync(left.horizontalScrollBar(), value)
+        )
+
     def _edit_header(self) -> None:
         source = self.state.source_path
         if self.is_busy() or source is None:
@@ -718,6 +998,10 @@ class AnalyzePage(QWidget):
             return
         text = self.header_text_input.text().strip()
         header_path = Path(text).absolute() if text else None
+        if header_path is None:
+            artifacts = associated_header_artifacts(source, str(self.state.header.get("username", "")))
+            if artifacts:
+                header_path = Path(artifacts["header_text"]["current"]).absolute()
         try:
             dialog = HeaderEditorDialog(self.state.header, source, header_path, self)
         except ValueError as exc:
@@ -725,7 +1009,10 @@ class AnalyzePage(QWidget):
             return
         if dialog.exec() == QDialog.DialogCode.Accepted and dialog.result_edit is not None:
             edit = dialog.result_edit
-            self._prepare_header_change(edit.payload, edit.save_header_text, edit.align_names)
+            self._prepare_header_change(
+                edit.payload, edit.save_header_text, edit.align_names,
+                header_path=edit.header_path if edit.save_header_text else None,
+            )
 
     def _use_header_text(self) -> None:
         source = self.state.source_path
@@ -759,13 +1046,15 @@ class AnalyzePage(QWidget):
         *,
         read_only_header: bool = False,
         header_snapshot=None,
+        header_path: Path | None = None,
     ) -> None:
         source = self.state.source_path
         if source is None or self.is_busy():
             self._log("ERROR: load a data header and wait for processing to finish.")
             return
-        header_text = self.header_text_input.text().strip()
-        header_path = Path(header_text).absolute() if header_text else None
+        if header_path is None:
+            header_text = self.header_text_input.text().strip()
+            header_path = Path(header_text).absolute() if header_text else None
         try:
             inventory = inspect_header_artifacts(source, str(payload.get("username", "")), header_path)
             current = read_header(source)
@@ -863,21 +1152,6 @@ class AnalyzePage(QWidget):
         candidates.extend(output / f"{stem}{suffix}" for suffix in ("_exposure.csv", "_thickness.csv", "_animation.gif"))
         return sorted(path.absolute() for path in candidates if path.is_file() or path.is_symlink())
 
-    def _affected_paths(self, action: str, snapshot: ProcessingSnapshot, output: Path) -> list[Path]:
-        source = self.state.source_path
-        assert source is not None
-        affected: set[Path] = set()
-        if snapshot.write_condensed_json:
-            if action in {"condense", "run_all"}:
-                working = source if self.state.input_is_condensed else condensed_path(source)
-            else:
-                working = self.state.pipeline.working_path if self.state.pipeline is not None else None
-            if working is not None and (working.exists() or working.is_symlink()):
-                affected.add(working.absolute())
-        if action in {"generate_outputs", "run_all"}:
-            affected.update(self._existing_output_paths(output))
-        return sorted(affected)
-
     def _unsafe_output_aliases(self, action: str, snapshot: ProcessingSnapshot, output: Path) -> list[str]:
         if action not in {"generate_outputs", "run_all"}:
             return []
@@ -908,23 +1182,6 @@ class AnalyzePage(QWidget):
                 if path.is_file() and candidate.samefile(path):
                     aliases.append(f"{candidate} aliases {label}: {path}")
         return aliases
-
-    def _confirm_processing(self, action: str, snapshot: ProcessingSnapshot, output: Path) -> bool:
-        affected = self._affected_paths(action, snapshot, output)
-        if not affected:
-            return True
-        message = (
-            "This operation may overwrite the following files. A stale thickness CSV may also be removed:\n\n"
-            + "\n".join(
-                f"{path} (symlink target: {path.resolve()})" if path.is_symlink() else str(path)
-                for path in affected
-            )
-            + "\n\nContinue?"
-        )
-        return QMessageBox.warning(
-            self, "Confirm file changes", message,
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No,
-        ) == QMessageBox.StandardButton.Yes
 
     def _run_action(self, action: str) -> None:
         source = self.state.source_path
@@ -971,9 +1228,6 @@ class AnalyzePage(QWidget):
             return
         if aliases:
             self._log("ERROR: output files alias protected inputs; choose another output directory:\n" + "\n".join(aliases))
-            return
-        if not self._confirm_processing(action, snapshot, output):
-            self._log("Processing cancelled; no files were changed.")
             return
         if self._settings_error:
             self._log("ERROR: settings could not be loaded; repair the configuration before processing.")

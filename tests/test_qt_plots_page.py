@@ -171,7 +171,7 @@ class PlotsPageTests(unittest.TestCase):
         finally:
             direct.cleanup()
 
-    def test_generate_uses_analyze_overwrite_confirmation(self):
+    def test_generate_does_not_prompt_before_overwriting(self):
         self.analyze._run_action("condense")
         self.wait_for_worker()
         output = self.root / "output"
@@ -180,8 +180,9 @@ class PlotsPageTests(unittest.TestCase):
         existing.write_bytes(b"existing")
         with patch.object(QMessageBox, "warning", return_value=QMessageBox.StandardButton.No) as warning:
             self.plots.generate_button.click()
-        warning.assert_called_once()
-        self.assertEqual(existing.read_bytes(), b"existing")
+        warning.assert_not_called()
+        self.wait_for_worker()
+        self.assertNotEqual(existing.read_bytes(), b"existing")
         self.assertFalse(self.state.busy)
 
 
