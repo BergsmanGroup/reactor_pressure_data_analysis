@@ -4,8 +4,8 @@ plot_utils.py
 Figure-building utilities for the Reactor Pressure Analyzer.
 
 All functions work with plain matplotlib Figure objects so they can be used
-both for headless batch-saving (Agg backend) and for embedding in the tkinter
-preview window (FigureCanvasTkAgg).
+both for headless batch-saving (Agg backend) and for embedding in the Qt
+preview window (FigureCanvasQTAgg).
 
 Public API
 ----------

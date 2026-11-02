@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QBoxLayout, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
 
 
 class PageHeader(QWidget):
@@ -17,9 +17,9 @@ class PageHeader(QWidget):
         super().__init__(parent)
         self.setObjectName("pageHeader")
 
-        row = QHBoxLayout(self)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(16)
+        self.row = QHBoxLayout(self)
+        self.row.setContentsMargins(0, 0, 0, 0)
+        self.row.setSpacing(16)
 
         text_column = QVBoxLayout()
         text_column.setContentsMargins(0, 0, 0, 0)
@@ -38,10 +38,14 @@ class PageHeader(QWidget):
         text_container = QWidget(self)
         text_container.setLayout(text_column)
         text_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        row.addWidget(text_container, 1)
+        self.row.addWidget(text_container, 1)
 
         self.actions_widget = QWidget(self)
         self.actions_layout = QHBoxLayout(self.actions_widget)
         self.actions_layout.setContentsMargins(0, 0, 0, 0)
         self.actions_layout.setSpacing(8)
-        row.addWidget(self.actions_widget)
+        self.row.addWidget(self.actions_widget)
+
+    def set_compact(self, compact: bool) -> None:
+        self.row.setDirection(QBoxLayout.Direction.TopToBottom if compact else QBoxLayout.Direction.LeftToRight)
+        self.row.setSpacing(8 if compact else 16)

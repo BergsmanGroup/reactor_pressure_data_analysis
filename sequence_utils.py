@@ -8,10 +8,12 @@ No GUI or I/O dependencies — safe to import anywhere.
 import re
 import copy
 from colorsys import hsv_to_rgb
+from decimal import Decimal, InvalidOperation
 import numpy as np
+from recipe_timing_core import PHASE_NAMES
 
-# Phase slot order is fixed and must match the controller firmware convention.
-PHASE_TYPES = ["prepump", "dosepump", "dosen2", "dose", "hold", "prepurge", "purge"]
+# Phase names follow the owner-specified recipe column order.
+PHASE_TYPES = list(PHASE_NAMES)
 
 
 def _coerce_int(value, default: int = 0) -> int:
@@ -31,8 +33,8 @@ def _coerce_int(value, default: int = 0) -> int:
     if not text:
         return default
     try:
-        return int(float(text))
-    except (TypeError, ValueError):
+        return int(Decimal(text))
+    except (InvalidOperation, OverflowError, TypeError, ValueError):
         return default
 
 
@@ -132,8 +134,8 @@ def compute_phase_bins(seq_dict: dict, shift: float = 0.0) -> dict:
             vals = [float(v) for v in timing]
             is_lr = (
                 len(vals) >= 5
-                and abs(vals[1]) <= 1e-12   # dosepump
-                and abs(vals[2]) <= 1e-12   # dosen2
+                and abs(vals[1]) <= 1e-12   # dosen2
+                and abs(vals[2]) <= 1e-12   # dosepump
                 and abs(vals[3]) <= 1e-12   # dose
                 and abs(vals[4]) > 1e-12    # hold
             )

@@ -6,6 +6,7 @@ import json
 import shutil
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import _helpers
@@ -70,6 +71,13 @@ class OwnerExampleTests(unittest.TestCase):
         payload = convert_to_json.build_payload(self.df)
         expected_hr = round(OWNER_EXAMPLE_TOTAL_SECONDS / 3600.0, 6)
         self.assertAlmostEqual(_details(payload)["ProcessTimeHr"], expected_hr, places=6)
+        self.assertEqual(convert_to_json.estimate_process_seconds(self.df), OWNER_EXAMPLE_TOTAL_SECONDS)
+
+    def test_explicit_start_time_includes_wait_and_process_duration(self):
+        start = datetime(2026, 1, 2, 12, 0, 0)
+        payload = convert_to_json.build_payload(self.df, details={"WaitTime": 75}, start_time=start)
+        expected_end = start + timedelta(seconds=75 + OWNER_EXAMPLE_TOTAL_SECONDS)
+        self.assertEqual(_details(payload)["EndTime"], expected_end.strftime("%Y-%m-%d %H:%M:%S"))
 
     def test_cycle_column_marks_sequence_starts(self):
         rows = convert_to_json.extract_timing_table(self.df)

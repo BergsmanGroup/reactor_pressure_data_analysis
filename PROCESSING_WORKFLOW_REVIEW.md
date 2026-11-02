@@ -2,6 +2,10 @@
 
 This document answers the four review questions, proposes a concrete refactor, and assesses feasibility. **No code files were changed as part of this review** — this is a planning document only.
 
+The original review predates the PySide6 cutover; references to the Tk GUI
+describe the historical implementation. See [WHITEPAPER.md](WHITEPAPER.md) for
+the current processing interface.
+
 ---
 
 ## 1. Making temperature attachment more efficient

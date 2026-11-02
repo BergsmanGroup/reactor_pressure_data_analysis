@@ -4,29 +4,49 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QCloseEvent, QResizeEvent
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMessageBox,
+    QScrollArea,
     QStackedWidget,
     QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
-from reactor_ui.widgets.card import Card
-from reactor_ui.widgets.page_header import PageHeader
+from reactor_ui.pages.recipe_editor_page import RecipeEditorPage
+from reactor_ui.pages.analyze_page import AnalyzePage
+from reactor_ui.pages.plots_page import PlotsPage
+from reactor_ui.pages.settings_page import SettingsPage
+from reactor_ui.pages.help_page import HelpPage
+from reactor_ui.models.analysis_state import AnalysisState
 
 
-PAGES: Sequence[tuple[str, str, str, str]] = (
-    ("analyze", "Analyze", "Analyze", "Process reactor pressure data and review run outputs."),
-    ("recipe_editor", "Recipe Editor", "Recipe Editor", "Review and prepare controller recipe payloads."),
-    ("plots", "Plots & Animation", "Plots & Animation", "Review cycle plots and generated animations."),
-    ("settings", "Settings", "Settings", "Application preferences."),
-    ("help", "Help", "Help", "Project documentation and application information."),
+PAGES: Sequence[tuple[str, str]] = (
+    ("analyze", "Analyze"),
+    ("recipe_editor", "Recipe Editor"),
+    ("plots", "Plots & Animation"),
+    ("settings", "Settings"),
+    ("help", "Help"),
 )
+
+
+class _PageStack(QStackedWidget):
+    def hasHeightForWidth(self) -> bool:
+        # Word-wrapped labels must not force resizable splitters to their full size hint.
+        return False
+
+    def heightForWidth(self, _width: int) -> int:
+        return -1
+
+    def minimumSizeHint(self) -> QSize:
+        current = self.currentWidget()
+        return current.minimumSizeHint() if current is not None else super().minimumSizeHint()
 
 
 class MainWindow(QMainWindow):
@@ -36,10 +56,12 @@ class MainWindow(QMainWindow):
         super().__init__(parent)
         self.setWindowTitle("Reactor Pressure Data Analyzer")
         self.resize(1440, 900)
-        self.setMinimumSize(1180, 720)
+        self.setMinimumSize(760, 440)
 
         self._buttons: dict[str, QToolButton] = {}
         self._pages: dict[str, QWidget] = {}
+        self._compact = False
+        self.analysis_state = AnalysisState(self)
 
         root = QWidget(self)
         root_layout = QHBoxLayout(root)
@@ -49,13 +71,35 @@ class MainWindow(QMainWindow):
         self.navigation_rail = self._build_navigation()
         root_layout.addWidget(self.navigation_rail)
 
-        self.page_stack = QStackedWidget(root)
+        self.page_scroll = QScrollArea(root)
+        self.page_scroll.setWidgetResizable(True)
+        self.page_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.page_stack = _PageStack(self.page_scroll)
         self.page_stack.setObjectName("pageStack")
-        root_layout.addWidget(self.page_stack, 1)
+        self.page_scroll.setWidget(self.page_stack)
+        root_layout.addWidget(self.page_scroll, 1)
         self.setCentralWidget(root)
 
-        for page_id, label, title, subtitle in PAGES:
-            page = self._build_placeholder_page(title, subtitle)
+        for page_id, label in PAGES:
+            if page_id == "analyze":
+                self.analyze_page = AnalyzePage(self.analysis_state, self.page_stack)
+                page = self.analyze_page
+            elif page_id == "recipe_editor":
+                self.recipe_editor = RecipeEditorPage(self.page_stack)
+                page = self.recipe_editor
+            elif page_id == "plots":
+                self.plots_page = PlotsPage(self.analysis_state, self.analyze_page, self.page_stack)
+                page = self.plots_page
+            elif page_id == "settings":
+                self.settings_page = SettingsPage(
+                    self.analysis_state, self.analyze_page.settings_path, self.analyze_page.default_settings_path, self.page_stack
+                )
+                page = self.settings_page
+            elif page_id == "help":
+                self.help_page = HelpPage(parent=self.page_stack)
+                page = self.help_page
+            else:
+                raise RuntimeError(f"No implementation for page: {page_id}")
             self._pages[page_id] = page
             self.page_stack.addWidget(page)
             self._add_navigation_button(page_id, label)
@@ -89,39 +133,17 @@ class MainWindow(QMainWindow):
     def _add_navigation_button(self, page_id: str, label: str) -> None:
         button = QToolButton(self.navigation_rail)
         button.setObjectName("navButton")
-        button.setText(label)
+        button.setText(label.replace("&", "&&"))
         button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         button.setCheckable(True)
         button.setAutoExclusive(True)
         button.setMinimumHeight(44)
         button.setAccessibleName(f"{label} page")
+        button.setToolTip(label)
         button.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._navigation_layout.insertWidget(self._navigation_layout.count() - 1, button)
         self._buttons[page_id] = button
         button.clicked.connect(lambda checked=False, key=page_id: self._on_navigation_clicked(key, checked))
-
-    def _build_placeholder_page(self, title: str, subtitle: str) -> QWidget:
-        page = QWidget(self.page_stack)
-        page_layout = QVBoxLayout(page)
-        page_layout.setContentsMargins(32, 26, 32, 30)
-        page_layout.setSpacing(26)
-
-        header = PageHeader(title, subtitle, page)
-        page_layout.addWidget(header)
-
-        card = Card("Migration status", page)
-        notice = QLabel(
-            "This page has not been migrated yet. Use the existing application "
-            "(reactor_plotter.py) for this workflow.",
-            card.content,
-        )
-        notice.setObjectName("mutedText")
-        notice.setWordWrap(True)
-        notice.setMinimumHeight(58)
-        card.add_widget(notice)
-        page_layout.addWidget(card)
-        page_layout.addStretch(1)
-        return page
 
     def _on_navigation_clicked(self, page_id: str, checked: bool) -> None:
         if checked:
@@ -130,7 +152,13 @@ class MainWindow(QMainWindow):
     def show_page(self, page_id: str) -> None:
         if page_id not in self._pages:
             raise KeyError(f"Unknown application page: {page_id}")
-        self.page_stack.setCurrentWidget(self._pages[page_id])
+        page = self._pages[page_id]
+        changed = self.page_stack.currentWidget() is not page
+        self.page_stack.setCurrentWidget(page)
+        self.page_stack.updateGeometry()
+        if changed:
+            self.page_scroll.horizontalScrollBar().setValue(0)
+            self.page_scroll.verticalScrollBar().setValue(0)
         self._buttons[page_id].setChecked(True)
 
     def page_button(self, page_id: str) -> QToolButton:
@@ -138,3 +166,27 @@ class MainWindow(QMainWindow):
 
     def page_widget(self, page_id: str) -> QWidget:
         return self._pages[page_id]
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        if not hasattr(self, "settings_page"):
+            return
+        compact = event.size().width() < 1000
+        if compact != self._compact:
+            self._compact = compact
+            self.navigation_rail.setFixedWidth(160 if compact else 204)
+            self._buttons["plots"].setText("Plots" if compact else "Plots && Animation")
+            self.analyze_page.set_compact(compact)
+            self.recipe_editor.set_compact(compact)
+            self.plots_page.set_compact(compact)
+            self.settings_page.set_compact(compact)
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if self.analyze_page.is_busy():
+            QMessageBox.warning(self, "Processing in progress", "Wait for the current operation to finish before closing.")
+            event.ignore()
+        elif self.recipe_editor.confirm_discard() and self.settings_page.confirm_discard():
+            self.analyze_page.cleanup()
+            event.accept()
+        else:
+            event.ignore()

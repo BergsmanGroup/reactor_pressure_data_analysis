@@ -217,15 +217,8 @@ def save_converted_header(path: str | Path, payload: dict) -> Path:
     return output_path
 
 
-def save_header_text(path: str | Path, payload: dict) -> Path:
-    """Write a payload in the legacy human-readable header text structure."""
-    output_path = Path(path)
-    elapsed_line = ""
-    if output_path.exists():
-        for line in output_path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
-            if line.startswith("Time Elapsed:"):
-                elapsed_line = line
-                break
+def format_header_text(payload: dict, elapsed_line: str = "") -> str:
+    """Format the legacy header text without writing a file."""
     details = payload.get("experimentalDetails", "")
     if isinstance(details, (dict, list)):
         details_text = json.dumps(details, ensure_ascii=False, separators=(",", ":"), allow_nan=True)
@@ -248,7 +241,19 @@ def save_header_text(path: str | Path, payload: dict) -> Path:
     ])
     if elapsed_line:
         lines.append(elapsed_line)
-    output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return "\n".join(lines) + "\n"
+
+
+def save_header_text(path: str | Path, payload: dict) -> Path:
+    """Write a payload in the legacy human-readable header text structure."""
+    output_path = Path(path)
+    elapsed_line = ""
+    if output_path.exists():
+        for line in output_path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+            if line.startswith("Time Elapsed:"):
+                elapsed_line = line
+                break
+    output_path.write_text(format_header_text(payload, elapsed_line), encoding="utf-8")
     return output_path
 
 

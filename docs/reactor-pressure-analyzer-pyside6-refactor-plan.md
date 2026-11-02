@@ -1,5 +1,24 @@
 # Reactor Pressure Data Analyzer — PySide6 Refactor Plan
 
+## Cutover status
+
+The Qt application is the production interface: `reactor_plotter.py` starts
+`reactor_ui.app.main()`, `run_gui.bat` uses that entry point, and the temporary
+developer launcher and legacy Tk UI have been removed. The `.venv`-based
+distribution remains in use; an installer is outside this migration.
+
+The cutover comparison used identical synthetic runs with temperature telemetry
+and iSE input. Tk and Qt processing options, condensed records, exposure and
+thickness CSVs, and plot/summary counts matched. The Qt lifecycle regression
+and 40 consecutive header-suite stress runs passed. A 600-row recipe covering
+60 million nominal cycles remained compact and responsive. The interface was
+reviewed at 100%, 150%, and 200% scaling; narrow layouts stack panels and retain
+scroll access. See the [README](../README.md) for launch and test commands.
+
+The remainder preserves the original planning analysis and its historical
+pre-migration observations. The owner decisions and safety notes near the end
+supersede earlier recommendations and open questions.
+
 ## Executive recommendation
 
 Migrate the GUI layer to **PySide6 with Qt Widgets**. The requested product is no longer just a re-layout of two Tkinter tabs: the supplied designs call for persistent navigation, a high-density editor, resizable panels, a custom proportional timeline with a draggable playhead, synchronized selection, clipboard editing, undo/redo, and a consistent dark theme. Qt's model/view table, `QSplitter`, signals/slots, `QUndoStack`, clipboard support, and custom painting are a better fit for that interaction model than expanding the current widget-per-cell Tkinter UI.
@@ -21,14 +40,14 @@ The existing [Tkinter-oriented plan](reactor-pressure-analyzer-gui-refactor-plan
 | Keep Tkinter | Avoids the migration and dependency cost, and preserves the current launch path. But the current `ttk.Notebook`, callback-heavy `gui.py`, and per-cell Entry construction in `HeaderEditorDialog` would need substantial custom code for this design's model/view editing, undo, consistent dark styling, and page navigation. | Not preferred for this UX-led refactor; retain only as a temporary development-branch baseline and rollback. |
 | QML | Could support animated/custom interfaces, but the current application is a desktop data-entry/analysis tool and has no declarative-UI requirement. It would add a second Qt UI paradigm. | Do not use absent a specific future requirement. |
 
-## Repository findings
+## Repository findings (pre-migration baseline)
 
 ### Entry points, UI, and dependencies
 
-- [reactor_plotter.py](../reactor_plotter.py) imports `ReactorApp` from [gui.py](../gui.py) and calls `mainloop()`.
+- The former `reactor_plotter.py` imported `ReactorApp` from `gui.py` and called `mainloop()`.
 - `ReactorApp._build_ui()` currently creates a `ttk.Notebook` with **Reactor Plots** and **Convert Recipe Sheet** tabs. `_build_plot_tab()` assembles the processing inputs, options, progress, logs, and output controls; `_build_recipe_tab()` loads a recipe, shows validation and JSON preview, and exports a payload. The current recipe tab is not an editor.
 - `gui.py` is also the controller: it owns application state, file dialogs, error reporting, configuration persistence, conversion callbacks, and pipeline event handlers. Long analysis tasks use `threading.Thread`; `_log()` and `_set_progress()` marshal UI work through `after()`.
-- `HeaderEditorDialog` in [header_editor.py](../header_editor.py) is a modal Tk `Toplevel` with metadata fields, valve metadata, and a manually constructed timing table. It has row insertion/deletion and reset controls, but no rectangular clipboard paste or undo stack. It is the post-run header editor, not the pre-run recipe editor.
+- The former `HeaderEditorDialog` in `header_editor.py` was a modal Tk `Toplevel` with metadata fields, valve metadata, and a manually constructed timing table. It was the post-run header editor, not the pre-run recipe editor.
 - [requirements.txt](../requirements.txt) lists Matplotlib, NumPy, pandas, Pillow, and openpyxl; it has no GUI framework dependency because Tkinter is supplied by the Python installation. [run_gui.bat](../run_gui.bat) currently launches `gui.py`; [setup.bat](../setup.bat) tells users to run `reactor_plotter.py`. Make one Qt entry point authoritative at cutover and align both scripts.
 - [config_default.json](../config_default.json) stores processing preferences, per-reactor valve names, and reactor types. `ReactorApp._load_settings_state()` and `_save_settings_state()` manage them; there is no current Settings or Help page.
 - `gui.py` selects Matplotlib's Agg backend and embeds figures with `FigureCanvasTkAgg`. The Qt UI must replace that widget integration with QtAgg and prove that headless/batch file generation still behaves as before.
@@ -201,6 +220,7 @@ Use delegates for cycle counts, valve selection/number, and timing numeric input
 ### Open, draft, and export semantics
 
 - **Open** imports `.xlsx`, `.xls`, or `.csv` through the existing `load_table()` path. The workbook/CSV remains the user's authoring source and is treated read-only by the GUI.
+- **New** starts an in-memory draft. Edit its metadata and timing cells directly; use rectangular Ctrl+C/Ctrl+V, row controls, and Undo/Redo. Invalid cells remain visible and block export. Unsaved changes are confirmed before New, Open, or closing.
 - The first implementation keeps edits in an in-memory draft. Label the primary action **Export Payload…**, not ambiguous “Save Recipe”: call the existing conversion/validation boundary and write the established controller-facing JSON schema to a user-selected path. “Export As…” chooses another payload path. Never write the draft back into Excel.
 - Do not imply that exported controller JSON preserves Excel formulas, formatting, comments, or lossless round-trip editing. If persistent GUI drafts are required, add a distinct versioned draft envelope and provenance in a later decision; do not confuse it with the LabVIEW payload.
 - Preserve `username`, `experimentalDetails`, `SequenceNotes`, normalized recipe rows, and current output naming behavior unless golden tests demonstrate a bug that the owner approves changing.
@@ -332,7 +352,7 @@ Golden baselines live in `tests/golden/` (normalized payloads for the example CS
 - Test worker success, exception, permission failure/retry, and window shutdown during work. Cancellation is only an acceptance item if cooperative cancellation is implemented.
 - Verify Qt imports and startup through the documented `.venv`/Windows scripts on a clean environment. A packaged executable is a separate deliverable requiring an approved packaging tool and Qt plugin collection.
 
-## Risk register and approval gates
+## Risk register and approval gates (original plan)
 
 | Risk | Priority | Treatment |
 |---|---|---|
@@ -353,7 +373,7 @@ Golden baselines live in `tests/golden/` (normalized payloads for the example CS
 4. At cutover, update `reactor_plotter.py` to start the Qt `QApplication`, update `run_gui.bat` to call the authoritative entry point, and correct the `setup.bat` help text. Remove obsolete Tk UI code only after parity and rollback sign-off.
 5. Roll back by reverting the cutover/Qt commits or deploying the previous revision. Since recipe, header, and analysis formats remain unchanged, no user data migration is needed.
 
-## Decisions for the owner, in priority order
+## Original decisions for the owner, in priority order
 
 1. **Timing semantics:** confirm the seven workbook slot identities/order and whether valve/phase operations execute serially or overlap. Recommended default: do not publish authoritative run-time estimates until confirmed; prototype with a visible provisional label.
 2. **Excel formula oracle:** for different cycle counts per sequence, should the GUI/converter follow the current per-sequence algorithm or update the workbook's apparent first-count formula? Recommended default: per-sequence calculations after controller confirmation; treat workbook formula comparison as a test, not authority.
@@ -367,13 +387,21 @@ Golden baselines live in `tests/golden/` (normalized payloads for the example CS
 
 These answers supersede the open questions above wherever they conflict. Implementation prompts live in [prompts/qt_migration](../prompts/qt_migration/).
 
-1. **Timing semantics — resolved.** The nine recipe-table columns are, in order: `Cycle, Valve, PrePump, N2Dose, PumpDose, Dose, Hold, PrePurge, Purge`. The seven timing slots are therefore `PrePump, N2Dose, PumpDose, Dose, Hold, PrePurge, Purge` (workbook column C labelled "PrePurge" in the current template is a template typo for `PrePump`). Slots within a row and rows within a sequence execute serially, matching the existing backend accumulation; the timeline no longer needs a "provisional" label once it uses this mapping.
-2. **Multi-sequence cycle counts — resolved.** A number in the Cycle column marks the first row of a sequence and is that sequence's cycle count; blank (or zero) rows belong to the sequence above. Each sequence's duration is `cycle_count × sum(slot durations of its rows)`, and the run duration is the sum over sequences. This is what `convert_to_json._estimate_process_times()` already does and is authoritative. The workbook `M6` formula is not an oracle.
+1. **Timing slot labels — resolved; scheduling remains unconfirmed.** The owner identified the nine recipe-table columns as `Cycle, Valve, PrePump, N2Dose, PumpDose, Dose, Hold, PrePurge, Purge`. The seven timing slots are therefore `PrePump, N2Dose, PumpDose, Dose, Hold, PrePurge, Purge`; workbook column C is labelled "PrePurge" in the current template. The owner did not explicitly confirm whether controller operations overlap. The existing backend adds the slot durations serially, so the GUI must identify resulting times as estimates rather than confirmed controller timing.
+2. **Multi-sequence cycle counts — resolved.** A number in the Cycle column marks the first row of a sequence and is that sequence's cycle count; blank (or zero) rows belong to the sequence above. The existing serial estimate is `cycle_count × sum(slot durations of its rows)` per sequence, summed over sequences. This cycle-count interpretation is authoritative, but the resulting duration remains provisional until controller scheduling is confirmed. The workbook `M6` formula is not an oracle.
 3. **Wait time — separate.** The Recipe Editor exposes **Wait time** and **Start time** fields. Predicted end time = start time + wait time + run duration. Wait time is not drawn inside the run timeline.
 4. **Save semantics — in-memory draft + Export Payload…**, never overwrite Excel.
 5. **Distribution — existing `.venv` workflow**; packaging is out of scope.
 6. **Settings/Help — only what existing config/docs support**; no placeholder features.
 7. **Header corrections — extra safety.** Any action that rewrites an existing file must list every affected file (and renames) before execution, require explicit confirmation, and create a backup first. A sidecar-by-default design remains a follow-on.
+
+**Phase-label migration approved:** post-run labels for the second and third timing slots change from `dosepump, dosen2` to `dosen2, dosepump`, matching the owner-specified recipe labels. Plot dimensions can change as a result; the owner accepted that change and stated that backwards compatibility for the PrePump/PrePurge label mix-up is not required. The serial timing calculation remains an estimate until controller scheduling is confirmed.
+
+### Qt header-correction safeguards
+
+The Analyze page's **Edit Data Header** and **Use Header Text as Data Header** actions first show every planned overwrite, creation, optional associated-file rename, backup, and temporary path. Applying the plan requires a separate checkbox confirmation; Cancel is the default. Each existing file involved in the correction receives a timestamped backup before originals change, and rewritten files are staged and atomically replaced. Existing rename destinations, symlink inputs, and conflicting file aliases are rejected. If an operation fails partway through, the error lists completed changes and backup paths so originals can be restored manually. Header comparison itself is read-only.
+
+These backups apply to explicit header corrections. Normal analysis still separately warns and asks before overwriting an existing condensed working file or generated outputs; it does not create header-correction backups for those processing operations.
 
 ## Recommended first implementation milestone
 

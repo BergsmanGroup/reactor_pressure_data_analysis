@@ -5,12 +5,17 @@ from __future__ import annotations
 import sys
 from collections.abc import Sequence
 
+import matplotlib
+
+matplotlib.use("Agg")
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QApplication
 
 from reactor_ui.main_window import MainWindow
 from reactor_ui.theme import apply_theme
+from reactor_ui.widgets.window_geometry import fit_to_available_screen
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -26,5 +31,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     apply_theme(app)
 
     window = MainWindow()
+    fit_to_available_screen(window)
     window.show()
     return app.exec()

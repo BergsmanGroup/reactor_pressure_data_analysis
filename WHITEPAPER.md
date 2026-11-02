@@ -7,7 +7,7 @@
 
 ## Abstract
 
-The Reactor Pressure Data Analyzer is a desktop application for post-processing and visualizing time-series pressure data collected from automated chemical vapor deposition (ALD/CVD-class) reactor experiments. It ingests newline-delimited JSON (NDJSON) log files produced by the reactor controller, reconstructs per-cycle phase timelines from valve-sequence metadata, generates phase-colored pressure plots, computes trapezoidal exposure integrals with leak-rate detection, and optionally assembles cycle animations. A second subsystem converts human-authored CSV recipe sheets into validated JSON payloads suitable for direct submission to the reactor controller. Both subsystems are exposed through a single Tkinter GUI with persistent session state.
+The Reactor Pressure Data Analyzer is a desktop application for post-processing and visualizing time-series pressure data collected from automated chemical vapor deposition (ALD/CVD-class) reactor experiments. It ingests newline-delimited JSON (NDJSON) log files produced by the reactor controller, reconstructs per-cycle phase timelines from valve-sequence metadata, generates phase-colored pressure plots, computes trapezoidal exposure integrals with leak-rate detection, and optionally assembles cycle animations. A second subsystem edits CSV or Excel recipe sheets in memory and exports validated JSON payloads for the reactor controller. Both are exposed through a PySide6 desktop interface with persistent processing settings.
 
 ---
 
@@ -27,37 +27,40 @@ The Reactor Pressure Data Analyzer is a desktop application for post-processing 
 
 ## 1. System Architecture
 
-The application is organized as a single-window Tkinter GUI (`reactor_plotter.py` → `gui.py`) that delegates all non-UI work to a set of stateless utility modules plus one stateful orchestration module. Each background operation (condensing, phase labeling, temperature attachment, preview rendering, and plot/animation generation) runs on its own background `threading.Thread` so the GUI remains responsive during long operations. Session parameters are persisted to the local `config_local.json` and reloaded on startup.
+The application starts at `reactor_plotter.py` and uses PySide6/Qt Widgets for its window, pages, dialogs, and model/view tables. Analyze operations run in a Qt worker thread with signals carrying progress and results to the interface. Batch plots use Matplotlib Agg and the embedded preview uses QtAgg. Processing defaults and valve names are persisted to local `config_local.json`; recipe drafts remain in memory until exported.
 
 ```
-reactor_plotter.py          Entry point; instantiates ReactorApp
-│
-└── gui.py  (ReactorApp)    Main window with two tabs
-      ├── pipeline.py       Staged processing pipeline (condense, label
-      │                     phases, attach temperature, preview, generate)
-      │     ├── data_parser.py    NDJSON streaming and condensing
-      │     ├── sequence_utils.py Valve sequence → phase-bin timeline
-      │     └── plot_utils.py     Matplotlib figure building and exposure math
-      ├── ise_utils.py      In-situ ellipsometer CSV parsing
-      ├── header_editor.py  Modal header-field editor
-      └── convert_to_json.py  CSV recipe → JSON payload
+reactor_plotter.py            Entry point; starts reactor_ui.app.main()
+├── reactor_ui               Analyze, Recipe Editor, Plots, Settings, Help
+│     ├── workers            Background processing and progress signals
+│     ├── dialogs/adapters   Guarded header correction
+│     └── models/widgets     Recipe editing and proportional timeline
+└── Backend modules
+      ├── pipeline.py        Staged processing orchestration
+      ├── data_parser.py     NDJSON streaming and condensing
+      ├── sequence_utils.py  Valve sequence → phase-bin timeline
+      ├── plot_utils.py      Matplotlib figures and exposure math
+      ├── ise_utils.py       In-situ ellipsometer CSV parsing
+      └── convert_to_json.py Recipe sheet → controller payload
 ```
 
-### Tab 1 — Reactor Plots
+### Analyze and Plots
 
 Loads a raw (or previously condensed) NDJSON data file, parses its embedded valve-sequence header, and runs a staged pipeline (see [Section 4](#4-processing-pipeline--reactor-plots)):
 1. Condense the raw file into a small working file.
 2. Compute and label phase sequences.
 3. Optionally attach temperature data.
-4. (Detailed iSE attachment is not yet implemented.)
+4. Optionally align iSE thickness readings with the labeled cycles.
 5. Preview any single cycle interactively.
 6. Generate every cycle PNG, the exposure CSV, the iSE thickness CSV, and an animated GIF.
 
-A single "Run All" button chains steps 1, 2, 3 (if enabled), and 6 for one-click processing; each step also has its own button for incremental, re-runnable work.
+A single "Run All" button chains steps 1, 2, optional steps 3 and 4, and 6 for one-click processing; each step also has its own button for incremental, re-runnable work.
 
-### Tab 2 — Convert Recipe Sheet
+### Recipe Editor
 
-Loads a CSV recipe sheet authored by the experimenter, validates its structure against a strict schema, displays warnings inline, and exports a JSON payload that the reactor controller can consume directly.
+Loads a CSV or Excel recipe sheet, allows in-memory edits and undo/redo, and exports a controller JSON payload without writing to the source sheet. The timeline shows sequence and phase estimates. Wait time is separate from the run timeline and is included in the predicted end time. Durations use the existing serial calculation and are **provisional** until controller scheduling/overlap is confirmed.
+
+Settings exposes the existing processing defaults and per-reactor valve names; Help links to local documentation.
 
 ---
 
@@ -93,7 +96,7 @@ Each line is a self-contained JSON object. Four record types appear in order:
 }
 ```
 
-Each row of `valveSequence` encodes: `[cycles, valve_number, prepump, dosepump, dosen2, dose, hold, prepurge, purge]`. A `cycles` value of `0` appends the valve row to the current sequence rather than starting a new one.
+Each row of `valveSequence` encodes: `[cycles, valve_number, prepump, dosen2, dosepump, dose, hold, prepurge, purge]`. A blank or `0` `cycles` value appends the valve row to the current sequence rather than starting a new one.
 
 **Pressure record:**
 
@@ -128,7 +131,7 @@ A structured spreadsheet with two logical sections:
 **Recipe section (from the "Cycles" marker row onward):**
 
 ```
-Cycles  Valve  PrepPump  DosePump  DoseN2  Dose  Hold  PrePurge  Purge
+Cycles  Valve  PrePump   N2Dose    PumpDose  Dose  Hold  PrePurge  Purge
 1       7      0         15        0       0     0     0         10
 5       5      4         0         0       300   0     0         300
         6      4         0         0       1     299   0         1800
@@ -168,7 +171,7 @@ Peeks at the first non-empty line; returns `True` if it has `"type":"data"`.
 
 ### 3.2 `pipeline.py`
 
-Stateful, GUI-independent orchestration for the staged processing workflow. `gui.py` builds one `ReactorPipeline` per loaded raw file and calls its methods from background threads; the class has no tkinter dependency, so it can equally be driven from a script or test.
+Stateful, GUI-independent orchestration for the staged processing workflow. The Qt Analyze page builds a `ReactorPipeline` from validated form values and runs its methods in a worker thread; scripts and tests can also call it directly.
 
 **`ProcessingOptions`** — a dataclass holding every user-adjustable knob (valve names, axis limits, grid settings, shift, wait time, leak-rate trim, condensed-JSON/temperature toggles, iSE thickness settings, animation FPS).
 
@@ -176,12 +179,13 @@ Stateful, GUI-independent orchestration for the staged processing workflow. `gui
 
 - **`condense(progress_cb, log_cb) → stats`** — Stage 1. Merges the raw file into a small working file (the conventional `_condensed.json` path, or a throwaway temp file when "Write condensed data JSON" is off) and caches the parsed `cycle_points`/`cycle_start_map`/baseline so every later stage reads the small working file instead of the original raw file.
 - **`label_phases(log_cb)`** — Stage 2. Computes phase bins/names from the header valve sequence (fast, in-memory) and, when a condensed JSON artifact is being kept, bakes per-row phase labels into the working file.
-- **`attach_temperature(progress_cb, log_cb) → stats | None`** — Stage 3 (optional). Bakes temperature and service-config metadata into the working file. Has no effect on plots — temperature only enriches the condensed JSON artifact.
+- **`attach_temperature(progress_cb, log_cb) → stats | None`** — Stage 3 (optional). Bakes temperature and service-config metadata into the working file for plot summaries, exposure exports, and cycle summaries.
+- **`attach_ise(progress_cb, log_cb) → dict`** — Stage 4 (optional). Reads thickness values and aligns them with cycles using the configured iSE valve and first cycle.
 - **`preview_cycle(cycle, progress_cb, log_cb) → Figure`** — Stage 5. Renders one cycle, always recomputing the phase structure from the live shift/valve-name options so tweaking those never requires re-running Condense.
 - **`generate_outputs(progress_cb, log_cb) → dict`** — Stage 6. Batch-renders every cycle PNG, the exposure CSV, the iSE thickness CSV, and the animation GIF.
-- **`run_all(progress_cb, log_cb) → dict`** — Convenience method chaining condense → label phases → (optional) attach temperature → generate outputs, backing the GUI's "Run All" button.
+- **`run_all(progress_cb, log_cb) → dict`** — Convenience method chaining condense → label phases → optional temperature and iSE attachment → generate outputs, backing the GUI's "Run All" button.
 
-Detailed iSE data attachment (stage 4) is not implemented; `ise_utils.py` still only provides the simple thickness-CSV export used by `generate_outputs()`.
+Aligned iSE values can appear in plot and cycle summaries. `generate_outputs()` can also export the thickness values as a separate CSV.
 
 ---
 
@@ -255,17 +259,17 @@ Writes the thickness values to a single-column CSV, inserting `blank_rows` empty
 
 ---
 
-### 3.6 `header_editor.py`
+### 3.6 Qt header editor and safety adapter
 
-**`HeaderEditorDialog(parent, header_dict)`**  
-A modal `Toplevel` window that presents the full header payload as an editable form. Scalar fields use `Entry` widgets; valve and sequence tables use `Treeview` grids. Changes are applied to a deep copy of the header; the caller receives the modified dict only if the user clicks Save.
+The Analyze page opens a modal Qt header editor for metadata, valve names, and sequence rows. A separate change-plan dialog lists the affected files, possible renames, and backup paths and requires explicit confirmation. Existing files are backed up before mutation and writes are staged. If an operation partially fails, the report identifies completed changes and backup paths for **manual** recovery; automatic rollback is not promised.
 
 ---
 
 ### 3.7 `convert_to_json.py`
 
-**`load_table(csv_path) → DataFrame`**  
-Reads the recipe CSV with pandas, preserving all cells including blanks.
+**`load_table(path) → DataFrame`**
+
+Reads a recipe CSV or Excel workbook with pandas, preserving recipe cells including blanks.
 
 **`validate_recipe_sheet(df) → list[str]`**  
 Checks structural requirements and returns a list of human-readable error strings. An empty list indicates a valid sheet. Checks include:
@@ -285,12 +289,12 @@ Formats a filename stem encoding the key experimental identifiers:
 
 ---
 
-### 3.8 `gui.py`
+### 3.8 `reactor_ui`
 
-**`ReactorApp(tk.Tk)`** — the root window.
+**`MainWindow`** — the Qt root window with Analyze, Recipe Editor, Plots & Animation, Settings, and Help pages.
 
 **State management:**  
-On startup, the local `config_local.json` is read and all widget variables are populated from it. If it does not exist, it is copied from the tracked `config_default.json` template. Reactor header filenames identify the configured reactor type, and valve names are saved separately for each reactor type when processing starts.
+On startup, processing settings are read from `config_local.json` when present, otherwise from the tracked `config_default.json`. Reactor header filenames identify the configured reactor type, and valve names are saved separately for each reactor type when processing starts. Recipe edits are not saved as a persistent draft.
 
 **Configurable parameters exposed in the GUI:**
 
@@ -305,7 +309,7 @@ On startup, the local `config_local.json` is read and all widget variables are p
 | iSE blank rows | `config_default.json` | Blank-row spacing in ellipsometer output CSV |
 
 **Threading:**  
-Each pipeline stage (condense, label phases, attach temperature, preview, generate outputs, run all) is dispatched to its own `threading.Thread` from the corresponding button handler, calling into a `ReactorPipeline` instance (see [Section 3.2](#32-pipelinepy)). Progress updates are posted to the main thread via `widget.after(0, callback)` to avoid Tkinter thread-safety issues. The log text box receives append calls through the same mechanism.
+Each pipeline stage is dispatched to a `QThread` worker, which reports progress, log messages, results, and errors through Qt signals. Only one pipeline operation is active at a time.
 
 ---
 
@@ -322,11 +326,11 @@ data_parser.read_header()
 sequence_utils.convert_sequence()
   → seq_dict: {seqN: {cycles, valve_N: [t0..t6]}}
         │
-        ├── [optional] header_editor.HeaderEditorDialog
-        │     → user can modify fields in-place
+        ├── [optional] Qt header editor and confirmed change plan
+        │     → backups and staged in-place correction
         │
         ▼
-gui.py builds a pipeline.ReactorPipeline(raw_path, out_dir, seq_dict, options)
+Analyze builds a pipeline.ReactorPipeline(raw_path, out_dir, seq_dict, options)
         │
         ▼
 Stage 1  pipeline.condense()
@@ -343,9 +347,9 @@ Stage 2  pipeline.label_phases()
         ▼ [optional]
 Stage 3  pipeline.attach_temperature()
   → bakes temperature + service-config metadata into the working file
-    (does not affect plots)
+    for downstream summaries and exports
         │
-        ├── [optional, not yet implemented] Stage 4 -- detailed iSE data
+        ├── [optional] Stage 4 -- align iSE thickness readings with cycles
         │
         ▼ [optional, any time after Stage 1]
 Stage 5  pipeline.preview_cycle(cycle)
@@ -471,7 +475,7 @@ All outputs are written to the same directory as the loaded input file unless th
 | `{stem}_condensed.json` | NDJSON | Merged/condensed version of raw log for fast re-runs |
 | `{stem}_animation.gif` | GIF | Animated cycle sequence |
 | `{filename}.json` | JSON | Recipe payload for reactor controller |
-| `{stem}_ise_thickness.csv` | CSV | Ellipsometer thickness column, optionally spaced |
+| `{stem}_thickness.csv` | CSV | Ellipsometer thickness column, optionally spaced |
 
 ### Exposure CSV Column Schema
 
@@ -505,13 +509,15 @@ Creates a `.venv` virtual environment in the project directory and installs all 
 run_gui.bat
 ```
 
-Activates `.venv`, confirms requirements, and starts the application. Alternatively:
+Uses `.venv` and starts the Qt application. Run `run_gui.bat --setup` to install or update dependencies explicitly. Alternatively, use the virtual environment directly:
 
 ```bat
-python reactor_plotter.py
+.venv\Scripts\python.exe reactor_plotter.py
 ```
 
-**Session state** is automatically saved to the ignored local `config_local.json` and restored on next launch, preserving parameter values and per-reactor valve name mappings. The tracked `config_default.json` contains the clean first-run state and is copied only when the local file is missing. Each processing run appends the current file's valve names, header GUID, filename-derived `process_datetime`, actual write-time `log_datetime`, and data filename to the ignored local `valve_name_log.jsonl`.
+**Settings** are saved to the ignored local `config_local.json` when processing or saving Settings and restored on next launch. `setup.bat` copies the tracked `config_default.json` only if the local file is missing. Each processing run appends valve and run information to the ignored local `valve_name_log.jsonl`.
+
+The recipe source sheet is never overwritten by export. Header correction is an explicitly confirmed, backed-up operation; ordinary analysis separately warns before overwriting an existing condensed input or generated outputs and does not create header-correction backups. See the [README](README.md) for the test command.
 
 ---
 
@@ -524,8 +530,9 @@ python reactor_plotter.py
 | `pandas` | 2.2 | CSV recipe sheet parsing |
 | `Pillow` | 10.0 | GIF animation assembly |
 | `openpyxl` | 3.1 | pandas optional Excel engine |
+| `PySide6` | 6.7 | Qt Widgets interface and QtAgg preview |
 
-All UI components use the Python standard library (`tkinter`, `threading`, `json`, `hashlib`, `csv`). No external GUI frameworks are required.
+Other standard-library modules support file handling, concurrency, and serialization.
 
 ---
 

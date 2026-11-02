@@ -47,7 +47,7 @@ set "PYTHONUTF8=1"
 set "PYTHONIOENCODING=utf-8"
 
 echo [INFO] Launching Reactor Pressure Data Analyzer...
-"%VENV_PY%" "gui.py" %*
+"%VENV_PY%" "reactor_plotter.py" %*
 set "EXIT_CODE=%ERRORLEVEL%"
 
 if not "%EXIT_CODE%"=="0" (

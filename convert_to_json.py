@@ -1,8 +1,11 @@
 import argparse
 import io
 import json
+from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 import pandas as pd
+from recipe_timing_core import cycle_seconds
 
 
 RECIPE_COLS = 10
@@ -622,12 +625,12 @@ def extract_timing_table(
         if col_idx == 0:
             # Cycles: blank → "", non-blank → string of int
             timing_df.iloc[:, col_idx] = timing_df.iloc[:, col_idx].map(
-                lambda v: "" if _is_blank_like(v, zero_is_blank=True) else str(int(float(_clean_cell(v))))
+                lambda v: "" if _is_blank_like(v, zero_is_blank=True) else str(int(Decimal(_clean_cell(v))))
             )
         elif col_idx == 1:
             # Valve number: blank → "0", non-blank → string of int
             timing_df.iloc[:, col_idx] = timing_df.iloc[:, col_idx].map(
-                lambda v: "0" if (_clean_cell(v) == "" or _clean_cell(v).lower() == "nan") else str(int(float(_clean_cell(v))))
+                lambda v: "0" if (_clean_cell(v) == "" or _clean_cell(v).lower() == "nan") else str(int(Decimal(_clean_cell(v))))
             )
         elif col_idx < RECIPE_SEQUENCE_COLS:
             # Timing cols 2–8: blank → "0", non-blank → string of float
@@ -655,25 +658,20 @@ def _to_float(value) -> float:
         return 0.0
 
 
-def _estimate_process_times(df: pd.DataFrame, details: dict) -> dict:
-    """
-    Compute total process time from timing rows and estimate end time.
-
-    Sequence duration is the sum of phase columns (index 2..8) across all
-    valve rows in the sequence, multiplied by the sequence cycle count.
-    """
+def estimate_process_seconds(df: pd.DataFrame) -> float:
+    """Return the existing per-sequence estimate, excluding wait time."""
     recipe_rows = extract_timing_table(df)
 
     total_seconds = 0.0
     current_cycles = 0.0
-    current_seq_seconds = 0.0
+    current_phase_rows: list[list[float]] = []
 
     def _commit_sequence():
-        nonlocal total_seconds, current_cycles, current_seq_seconds
+        nonlocal total_seconds, current_cycles, current_phase_rows
         if current_cycles > 0:
-            total_seconds += current_cycles * current_seq_seconds
+            total_seconds += current_cycles * cycle_seconds(current_phase_rows)
         current_cycles = 0.0
-        current_seq_seconds = 0.0
+        current_phase_rows = []
 
     for row in recipe_rows:
         cycle_cell = _clean_cell(row[0]) if len(row) > 0 else ""
@@ -682,14 +680,28 @@ def _estimate_process_times(df: pd.DataFrame, details: dict) -> dict:
             current_cycles = _to_float(cycle_cell)
 
         phase_vals = row[2:9] if len(row) >= 9 else row[2:]
-        current_seq_seconds += sum(_to_float(v) for v in phase_vals)
+        current_phase_rows.append([_to_float(v) for v in phase_vals])
 
     _commit_sequence()
+    return total_seconds
+
+
+def _estimate_process_times(
+    df: pd.DataFrame, details: dict, start_time: datetime | None = None
+) -> dict:
+    """
+    Compute total process time from timing rows and estimate end time.
+
+    Sequence duration is the sum of phase columns (index 2..8) across all
+    valve rows in the sequence, multiplied by the sequence cycle count.
+    """
+    total_seconds = estimate_process_seconds(df)
 
     wait_seconds = _to_float(details.get("WaitTime", 0)) if isinstance(details, dict) else 0.0
     process_hours = round(total_seconds / 3600.0, 6)
     total_duration_seconds = wait_seconds + total_seconds
-    end_dt = pd.Timestamp.now() + pd.to_timedelta(total_duration_seconds, unit="s")
+    start_dt = pd.Timestamp.now() if start_time is None else pd.Timestamp(start_time)
+    end_dt = start_dt + pd.to_timedelta(total_duration_seconds, unit="s")
 
     out = {
         "ProcessTimeHr": process_hours,
@@ -736,6 +748,7 @@ def build_payload(
     rows: int | None = None,
     cols: int | None = None,
     exclude_falsey_edr_tags: bool = False,
+    start_time: datetime | None = None,
 ) -> dict:
     base_username, header_details = extract_header_details(df)
     if details is None:
@@ -746,7 +759,7 @@ def build_payload(
         payload_details = details
 
     if isinstance(payload_details, dict):
-        payload_details.update(_estimate_process_times(df, payload_details))
+        payload_details.update(_estimate_process_times(df, payload_details, start_time=start_time))
         sequence_notes = _extract_sequence_notes(df)
         if sequence_notes:
             payload_details["SequenceNotes"] = sequence_notes

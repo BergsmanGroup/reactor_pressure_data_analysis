@@ -3,10 +3,9 @@ pipeline.py
 -----------
 Pure processing-pipeline orchestration for the Reactor Pressure Analyzer.
 
-No tkinter dependency -- the staged workflow lives here so it can be driven
-by the GUI, scripts, or tests alike. ``gui.py`` is a thin wrapper that builds
-a :class:`ReactorPipeline`, runs its methods on a background thread, and
-forwards log/progress callbacks to the on-screen widgets.
+The staged workflow has no GUI dependency and can be driven by the Qt
+application, scripts, or tests. The Qt Analyze page runs pipeline operations
+in a worker thread and forwards log/progress callbacks to the interface.
 
 Stages
 ------

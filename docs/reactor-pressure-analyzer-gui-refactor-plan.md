@@ -1,5 +1,10 @@
 # Reactor Pressure Data Analyzer GUI Refactor Plan
 
+> Historical pre-migration plan. Its Tkinter recommendation and repository
+> observations have been superseded by the completed
+> [PySide6 migration](reactor-pressure-analyzer-pyside6-refactor-plan.md);
+> see the [README](../README.md) for the current interface and launch commands.
+
 ## Executive summary
 
 Modernize the Recipe Sheet tab into a pre-run recipe editor and timeline, while keeping Excel as the canonical authoring file and preserving the existing JSON payload contract. Keep Tkinter for the first release. The repository already has a working Tkinter application, Windows launch scripts, and processing code that is mostly independent of the UI; a framework migration would add packaging and regression risk without being necessary to deliver the requested layout.
@@ -14,9 +19,9 @@ This plan is based on the checked-in Python modules, workbook templates, sample 
 
 The current tree includes:
 
-- The app entry point, [reactor_plotter.py](../reactor_plotter.py), which creates `ReactorApp` from [gui.py](../gui.py).
+- The former app entry point created `ReactorApp` from `gui.py`.
 - Processing modules: [pipeline.py](../pipeline.py), [data_parser.py](../data_parser.py), [sequence_utils.py](../sequence_utils.py), [plot_utils.py](../plot_utils.py), and [ise_utils.py](../ise_utils.py).
-- Recipe conversion and validation in [convert_to_json.py](../convert_to_json.py); header parsing and persistence helpers in [header_text.py](../header_text.py); the modal post-run editor in [header_editor.py](../header_editor.py).
+- Recipe conversion and validation in [convert_to_json.py](../convert_to_json.py); header parsing and persistence helpers in [header_text.py](../header_text.py); the former modal post-run editor in `header_editor.py`.
 - Runtime dependencies in [requirements.txt](../requirements.txt), and Windows environment/launch scripts in [setup.bat](../setup.bat) and [run_gui.bat](../run_gui.bat).
 - A current and old Excel template, CSV recipe examples, payload examples, and the DID000141 workbook and condensed run output. There are generated plots and an exposure CSV under `DID000141/`.
 - [WHITEPAPER.md](../WHITEPAPER.md) and [PROCESSING_WORKFLOW_REVIEW.md](../PROCESSING_WORKFLOW_REVIEW.md). The whitepaper's statement that iSE attachment is not implemented is stale: `ReactorPipeline.attach_ise()` and cycle-summary support are present in the current code.

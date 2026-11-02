@@ -10,6 +10,7 @@ from pathlib import Path
 from _helpers import OWNER_EXAMPLE_CSV
 
 import convert_to_json
+from recipe_timing_core import SLOT_LABELS, TIMING_COLUMNS
 from sequence_utils import PHASE_TYPES, compute_phase_bins, convert_sequence, make_cycle_seq_map
 
 
@@ -39,6 +40,11 @@ class ConvertSequenceTests(unittest.TestCase):
         rows[3][0] = "0"
         self.assertEqual(convert_sequence(rows), self.seq)
 
+    def test_integer_identifiers_do_not_round_through_float(self):
+        valve = 9007199254740993
+        seq = convert_sequence([["1", str(valve), "10", "0", "0", "0", "0", "0", "0"]])
+        self.assertEqual(seq["seq1"]["valve_rows"][0][0], valve)
+
     def test_cycle_map_covers_every_nominal_cycle(self):
         mapping = make_cycle_seq_map(self.seq)
         self.assertEqual(len(mapping), 43)
@@ -54,10 +60,10 @@ class ConvertSequenceTests(unittest.TestCase):
         self.assertEqual(phased["seq3"]["phase_bins"][-1], 2030.0)
 
     def test_phase_type_order_is_pinned(self):
-        # Current labels. Slots 2 and 3 are known to be swapped relative to the
-        # owner-confirmed order (PrePump, N2Dose, PumpDose, ...); prompt 04
-        # resolves this deliberately and must update this assertion.
-        self.assertEqual(PHASE_TYPES, ["prepump", "dosepump", "dosen2", "dose", "hold", "prepurge", "purge"])
+        self.assertEqual(PHASE_TYPES, ["prepump", "dosen2", "dosepump", "dose", "hold", "prepurge", "purge"])
+        self.assertEqual(TIMING_COLUMNS[2:9], SLOT_LABELS)
+        phased = compute_phase_bins(convert_sequence([["1", "7", "0", "15", "3", "0", "0", "0", "0"]]))
+        self.assertEqual(phased["seq1"]["phase_names"], ["seq1_7_dosen2", "seq1_7_dosepump"])
 
 
 if __name__ == "__main__":

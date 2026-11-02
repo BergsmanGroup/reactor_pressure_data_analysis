@@ -115,6 +115,11 @@ def create_stylesheet() -> str:
         QPushButton:hover {{
             border-color: {COLORS["primary"]};
         }}
+        QPushButton:disabled, QPushButton#primaryButton:disabled {{
+            color: {COLORS["muted_text"]};
+            background-color: {COLORS["surface"]};
+            border-color: {COLORS["card_border"]};
+        }}
         QPushButton:focus {{
             border: 2px solid {COLORS["focus"]};
         }}
@@ -147,6 +152,19 @@ def create_stylesheet() -> str:
             background: {COLORS["card_border"]};
             min-height: 24px;
             border-radius: 4px;
+        }}
+        QScrollBar:horizontal {{
+            height: 10px;
+            background: {COLORS["surface"]};
+        }}
+        QScrollBar::handle:horizontal {{
+            background: {COLORS["card_border"]};
+            min-width: 24px;
+            border-radius: 4px;
+        }}
+        QScrollBar::add-line, QScrollBar::sub-line {{
+            width: 0px;
+            height: 0px;
         }}
         QSplitter::handle {{
             background-color: {COLORS["background"]};

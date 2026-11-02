@@ -488,11 +488,9 @@ def condense_log(
     input_path  = Path(input_path)
     output_path = Path(output_path) if output_path else condensed_path(input_path)
     file_size   = max(input_path.stat().st_size, 1)
-    same_file = False
-    try:
-        same_file = input_path.resolve() == output_path.resolve()
-    except Exception:
-        same_file = str(input_path) == str(output_path)
+    same_file = input_path.resolve() == output_path.resolve()
+    if not same_file and output_path.exists():
+        same_file = input_path.samefile(output_path)
 
     write_path = output_path
     if same_file:

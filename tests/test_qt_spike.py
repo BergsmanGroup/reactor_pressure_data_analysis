@@ -135,12 +135,5 @@ class QtSpikeTests(unittest.TestCase):
             window.close()
 
 
-class LegacyTkImportTests(unittest.TestCase):
-    def test_tk_gui_module_still_imports(self):
-        import gui
-
-        self.assertTrue(hasattr(gui, "ReactorApp"))
-
-
 if __name__ == "__main__":
     unittest.main()

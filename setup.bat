@@ -42,4 +42,4 @@ if not exist "config_local.json" (
 echo.
 echo Setup complete.
 echo You can run the app with:
-echo     python reactor_plotter.py
+echo     run_gui.bat
